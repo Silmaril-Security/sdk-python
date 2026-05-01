@@ -1,11 +1,24 @@
-PROPRIETARY AND CONFIDENTIAL
+SILMARIL SDK SOURCE-AVAILABLE LICENSE
 
 Copyright (c) 2024-2026 Silmaril Security Inc. All rights reserved.
 
 This software and its documentation are proprietary to Silmaril Security Inc.
-Unauthorized copying, distribution, modification, or use of this software,
-in whole or in part, is strictly prohibited without the express written
-permission of Silmaril Security Inc.
+
+Subject to a valid agreement with Silmaril Security Inc., you may use, copy,
+and modify this SDK solely to integrate your applications with Silmaril
+services.
+
+You may not:
+
+- redistribute, sublicense, sell, rent, lease, or otherwise provide this SDK to
+  third parties;
+- use this SDK to build, train, benchmark, or operate a competing product or
+  service;
+- remove or alter copyright, trademark, or proprietary notices;
+- reverse engineer hosted Silmaril services, models, systems, or APIs except to
+  the extent required by applicable law.
+
+No trademark rights are granted under this license.
 
 This software is provided "AS IS" without warranty of any kind, express or
 implied, including but not limited to the warranties of merchantability,
