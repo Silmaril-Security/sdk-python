@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "silmaril-security-sdk"
+version = "0.1.0"
+description = "Python SDK for Silmaril Firewall prompt injection and jailbreak detection"
+authors = [
+    { name = "Silmaril Security Inc", email = "engineering@silmarilsecurity.com" }
+]
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.33.0",
+]
+keywords = [
+    "silmaril",
+    "firewall",
+    "prompt-injection",
+    "jailbreak",
+    "llm-security",
+    "ai-security",
+    "langchain",
+]
+
+[project.optional-dependencies]
+async = [
+    "httpx>=0.25.0",
+]
+langchain = [
+    "httpx>=0.25.0",
+    "langchain-core>=0.2.0",
+]
+dev = [
+    "build>=1.2.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.1.0",
+    "twine>=5.0.0",
+]
+
+[project.urls]
+Homepage = "https://silmarilsecurity.com"
+Repository = "https://github.com/Silmaril-Security/sdk-python"
+Issues = "https://github.com/Silmaril-Security/sdk-python/issues"
+
+[tool.hatch.build]
+include = [
+    "src/silmaril_security/sdk",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/silmaril_security"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+pythonpath = ["src"]
