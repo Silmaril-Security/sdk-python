@@ -464,6 +464,8 @@ async def _async_classify_raw(
     tool_name: str | None,
     threshold: float,
 ) -> BlockResult:
+    import asyncio
+
     import httpx
 
     from silmaril_security.sdk.firewall import _block_result_from_json
@@ -482,13 +484,27 @@ async def _async_classify_raw(
             data = await _async_post_json(client, firewall, payload)
             return _block_result_from_json(data, threshold)
 
-        batch_payload: dict[str, Any] = {"texts": chunks, "threshold": threshold}
-        if hook is not None:
-            batch_payload["hooks"] = [hook_value(hook)] * len(chunks)
-        if tool_name:
-            batch_payload["tool_names"] = [tool_name] * len(chunks)
-        data = await _async_post_json(client, firewall, batch_payload)
-        results = [_block_result_from_json(item, threshold) for item in data["predictions"]]
+        semaphore = asyncio.Semaphore(firewall.chunk_concurrency)
+
+        async def classify_chunk(chunk: str) -> BlockResult:
+            payload: dict[str, Any] = {"text": chunk, "threshold": threshold}
+            hook_str = hook_value(hook)
+            if hook_str:
+                payload["hook"] = hook_str
+            if tool_name:
+                payload["tool_name"] = tool_name
+            async with semaphore:
+                data = await _async_post_json(client, firewall, payload)
+            return _block_result_from_json(data, threshold)
+
+        chunk_results = await asyncio.gather(
+            *(classify_chunk(chunk) for chunk in chunks),
+            return_exceptions=True,
+        )
+        for result in chunk_results:
+            if isinstance(result, BaseException):
+                raise result
+        results = [result for result in chunk_results if isinstance(result, BlockResult)]
         return max(results, key=lambda result: result.score)
 
 

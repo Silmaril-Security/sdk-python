@@ -35,7 +35,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.1.0
+pip install silmaril-security-sdk==0.1.1
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -117,6 +117,7 @@ Firewall(
     api_url: str,                                  # required
     threshold: float = 0.5,                        # default threshold; 0 blocks everything
     timeout: float = 10.0,                         # request timeout in seconds
+    chunk_concurrency: int = 8,                    # long-input chunk fanout limit
     hook_thresholds: dict[HookLabel | str, float] | None = None,
     shadow_mode: bool = False,                     # observe without blocking when true
     on_classify: Callable[[ClassifyEvent], None] | None = None,
@@ -226,8 +227,13 @@ All SDK exception types are regular Python exceptions and can be handled with
 ## Chunking
 
 Long inputs are chunked client-side into 400-token overlapping windows
-(64-token overlap). The maximum input is 10,240 tokens. Chunks are sent as an
-internal batch request, and the highest score is returned.
+(64-token overlap). The maximum input is 10,240 tokens. For `classify()`, chunks
+are sent as bounded parallel single-text requests with `chunk_concurrency`
+(default: 8), letting API Gateway and SageMaker distribute work across serving
+instances. The highest score is returned.
+
+`chunk_concurrency=1` sends chunk requests sequentially. `classify_batch()`
+continues to send independent texts as one batch request.
 
 `chunk_text()` is exported if you need to chunk manually.
 

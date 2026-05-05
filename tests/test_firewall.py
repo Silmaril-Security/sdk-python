@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 from typing import Any
 
 import pytest
 import requests
 
 from silmaril_security.sdk import (
+    CHUNK_WINDOW_CHARS,
+    DEFAULT_CHUNK_CONCURRENCY,
     BatchPromptBlockedException,
     BlockResult,
     Firewall,
@@ -58,6 +63,16 @@ def test_constructor_validates_thresholds():
             api_url=TEST_API_URL,
             hook_thresholds={HookLabel.USER_INPUT: -0.1},
         )
+
+
+def test_constructor_validates_chunk_concurrency():
+    with pytest.raises(ValueError, match="chunk_concurrency must be >= 1"):
+        Firewall(api_key="sk", api_url=TEST_API_URL, chunk_concurrency=0)
+
+
+def test_constructor_applies_default_chunk_concurrency():
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    assert fw.chunk_concurrency == DEFAULT_CHUNK_CONCURRENCY
 
 
 def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
@@ -217,6 +232,109 @@ def test_classify_batch_rejects_bad_lengths():
         fw.classify_batch(["a", "b"], tool_names=["tool"])
     with pytest.raises(ValueError, match="texts must not be empty"):
         fw.classify_batch([])
+
+
+def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+    calls: list[dict[str, Any]] = []
+    scores = [0.2, 0.95, 0.4, 0.1]
+    lock = threading.Lock()
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        with lock:
+            calls.append({"url": url, **kwargs})
+            score = scores[len(calls) - 1]
+        prediction = "MALICIOUS" if score >= 0.5 else "BENIGN"
+        return FakeResponse(200, {"prediction": prediction, "score": score})
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    result = fw.classify("a" * (CHUNK_WINDOW_CHARS * 3), hook=HookLabel.USER_INPUT)
+
+    assert result.prediction == "MALICIOUS"
+    assert result.score == 0.95
+    assert len(calls) > 1
+    for call in calls:
+        body = json.loads(call["data"])
+        assert "text" in body
+        assert "texts" not in body
+        assert body["hook"] == "user_input"
+        assert body["threshold"] == 0.5
+
+
+def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+    calls: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        with lock:
+            calls.append({"url": url, **kwargs})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1})
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    fw.classify(
+        "b" * (CHUNK_WINDOW_CHARS * 2),
+        hook=HookLabel.TOOL_RESPONSE,
+        tool_name="fetch_webpage",
+    )
+
+    assert len(calls) > 1
+    for call in calls:
+        body = json.loads(call["data"])
+        assert body["hook"] == "tool_response"
+        assert body["tool_name"] == "fetch_webpage"
+        assert "texts" not in body
+
+
+def test_classify_chunk_concurrency_limit(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, chunk_concurrency=2, shadow_mode=True)
+    active = 0
+    max_active = 0
+    calls = 0
+    lock = threading.Lock()
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        nonlocal active, max_active, calls
+        with lock:
+            active += 1
+            calls += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1})
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    fw.classify("c" * (CHUNK_WINDOW_CHARS * 5))
+
+    assert calls > 2
+    assert max_active <= 2
+
+
+def test_classify_long_input_propagates_chunk_error(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+    calls = 0
+    lock = threading.Lock()
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        nonlocal calls
+        with lock:
+            calls += 1
+            current = calls
+        if current == 1:
+            return FakeResponse(400, "boom", reason="Bad Request")
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1})
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    with pytest.raises(SilmarilApiError) as exc_info:
+        fw.classify("d" * (CHUNK_WINDOW_CHARS * 2))
+
+    assert exc_info.value.status == 400
+    assert calls > 1
 
 
 def test_optional_outcome_fields(monkeypatch):

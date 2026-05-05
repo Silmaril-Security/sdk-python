@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -33,6 +34,7 @@ LOG = logging.getLogger("silmaril_security.sdk")
 DEFAULT_THRESHOLD = 0.5
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_MAX_RETRIES = 5
+DEFAULT_CHUNK_CONCURRENCY = 8
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _MAX_BACKOFF_SECONDS = 30.0
 
@@ -100,6 +102,7 @@ class Firewall:
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         session: requests.Session | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        chunk_concurrency: int = DEFAULT_CHUNK_CONCURRENCY,
     ) -> None:
         if not api_key:
             raise ValueError("Firewall: api_key is required")
@@ -110,6 +113,10 @@ class Firewall:
             raise ValueError(f"Firewall: timeout must be non-negative, got {timeout}")
         if max_retries < 0:
             raise ValueError(f"Firewall: max_retries must be non-negative, got {max_retries}")
+        if chunk_concurrency < 1:
+            raise ValueError(
+                f"Firewall: chunk_concurrency must be >= 1, got {chunk_concurrency}"
+            )
 
         normalized_hook_thresholds: dict[str, float] = {}
         for hook, hook_threshold in (hook_thresholds or {}).items():
@@ -127,6 +134,7 @@ class Firewall:
         self.shadow_mode = shadow_mode
         self.on_classify = on_classify
         self.max_retries = max_retries
+        self.chunk_concurrency = chunk_concurrency
         self._session = session or requests.Session()
         self._session.headers.update(
             {
@@ -274,22 +282,44 @@ class Firewall:
         _validate_threshold("threshold", threshold_value)
         chunks = chunk_text(text)
         if len(chunks) == 1:
-            payload: dict[str, Any] = {"text": chunks[0], "threshold": threshold_value}
-            hook_str = hook_value(hook)
-            if hook_str:
-                payload["hook"] = hook_str
-            if tool_name:
-                payload["tool_name"] = tool_name
-            data = self._post_json(payload)
-            return _block_result_from_json(data, threshold_value)
+            return self._classify_single_raw(
+                chunks[0],
+                hook=hook,
+                tool_name=tool_name,
+                threshold=threshold_value,
+            )
 
-        results = self._classify_batch_raw(
-            chunks,
-            hooks=[hook] * len(chunks) if hook is not None else None,
-            tool_names=[tool_name] * len(chunks) if tool_name else None,
-            threshold=threshold_value,
-        )
+        workers = min(self.chunk_concurrency, len(chunks))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(
+                executor.map(
+                    lambda chunk: self._classify_single_raw(
+                        chunk,
+                        hook=hook,
+                        tool_name=tool_name,
+                        threshold=threshold_value,
+                    ),
+                    chunks,
+                )
+            )
         return max(results, key=lambda result: result.score)
+
+    def _classify_single_raw(
+        self,
+        text: str,
+        *,
+        hook: HookLabel | str | None = None,
+        tool_name: str | None = None,
+        threshold: float,
+    ) -> BlockResult:
+        payload: dict[str, Any] = {"text": text, "threshold": threshold}
+        hook_str = hook_value(hook)
+        if hook_str:
+            payload["hook"] = hook_str
+        if tool_name:
+            payload["tool_name"] = tool_name
+        data = self._post_json(payload)
+        return _block_result_from_json(data, threshold)
 
     def _classify_batch_raw(
         self,

@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from silmaril_security.sdk import (
+    CHUNK_WINDOW_CHARS,
     BlockResult,
     ClassifyEvent,
     Firewall,
@@ -106,3 +107,54 @@ async def test_async_langchain_handler_supports_async_callback(monkeypatch):
     assert len(events) == 1
     assert events[0].blocked is True
     assert events[0].shadow_mode is True
+
+
+@pytest.mark.asyncio
+async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
+    from silmaril_security.sdk.langchain import _async_classify_raw
+
+    fw = Firewall(
+        api_key="sk",
+        api_url="https://api.test.invalid/classify",
+        chunk_concurrency=2,
+    )
+    payloads = []
+    active = 0
+    max_active = 0
+
+    async def fake_post_json(client, firewall, payload):
+        nonlocal active, max_active
+        payloads.append(payload)
+        call_index = len(payloads)
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            import asyncio
+
+            await asyncio.sleep(0)
+            score = 0.95 if call_index == 2 else 0.1
+            return {
+                "prediction": "MALICIOUS" if score >= 0.5 else "BENIGN",
+                "score": score,
+            }
+        finally:
+            active -= 1
+
+    monkeypatch.setattr("silmaril_security.sdk.langchain._async_post_json", fake_post_json)
+
+    result = await _async_classify_raw(
+        fw,
+        "a" * (CHUNK_WINDOW_CHARS * 3),
+        hook=HookLabel.USER_INPUT,
+        tool_name="chat",
+        threshold=0.5,
+    )
+
+    assert result.score == 0.95
+    assert len(payloads) > 1
+    assert max_active <= 2
+    for payload in payloads:
+        assert "text" in payload
+        assert "texts" not in payload
+        assert payload["hook"] == "user_input"
+        assert payload["tool_name"] == "chat"
