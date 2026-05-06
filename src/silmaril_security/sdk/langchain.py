@@ -473,7 +473,11 @@ async def _async_classify_raw(
 
     chunks = __import__("silmaril_security.sdk.chunking", fromlist=["chunk_text"]).chunk_text(text)
     headers = {"x-api-key": firewall.api_key, "content-type": "application/json"}
-    async with httpx.AsyncClient(headers=headers, timeout=firewall.timeout) as client:
+    async with httpx.AsyncClient(
+        headers=headers,
+        timeout=firewall.timeout,
+        follow_redirects=False,
+    ) as client:
         if len(chunks) == 1:
             payload: dict[str, Any] = {"text": chunks[0], "threshold": threshold}
             hook_str = hook_value(hook)
@@ -513,11 +517,19 @@ async def _async_post_json(client: Any, firewall: Firewall, payload: dict[str, A
 
     import httpx
 
-    from silmaril_security.sdk.firewall import _RETRYABLE_STATUS_CODES, _retry_after_seconds
+    from silmaril_security.sdk.firewall import (
+        _MAX_ERROR_BODY_BYTES,
+        _RETRYABLE_STATUS_CODES,
+        _retry_after_seconds,
+    )
 
     for attempt in range(firewall.max_retries + 1):
         try:
-            response = await client.post(firewall.api_url, json=payload)
+            response = await client.post(
+                firewall.api_url,
+                json=payload,
+                follow_redirects=False,
+            )
         except httpx.HTTPError:
             if attempt < firewall.max_retries:
                 await asyncio.sleep(min(2**attempt, 30.0))
@@ -525,16 +537,22 @@ async def _async_post_json(client: Any, firewall: Firewall, payload: dict[str, A
             raise
         if response.status_code in _RETRYABLE_STATUS_CODES and attempt < firewall.max_retries:
             retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+            await response.aclose()
             await asyncio.sleep(retry_after if retry_after is not None else min(2**attempt, 30.0))
             continue
-        if response.status_code >= 400:
+        if response.status_code >= 300:
+            try:
+                body = response.text[:_MAX_ERROR_BODY_BYTES]
+            except Exception:
+                body = ""
+            await response.aclose()
             raise __import__(
                 "silmaril_security.sdk.exceptions",
                 fromlist=["SilmarilApiError"],
             ).SilmarilApiError(
                 status=response.status_code,
                 status_text=response.reason_phrase,
-                body=response.text,
+                body=body,
             )
         return response.json()
     raise RuntimeError("Firewall: exhausted retries")

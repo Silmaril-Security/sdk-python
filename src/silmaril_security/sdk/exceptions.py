@@ -19,7 +19,7 @@ class SilmarilApiError(Exception):
         self.status = status
         self.status_text = status_text
         self.body = body
-        super().__init__(f"Silmaril API error {status} {status_text}: {body}")
+        super().__init__(f"Silmaril API error {status} {status_text}".rstrip())
 
 
 APIError = SilmarilApiError

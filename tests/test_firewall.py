@@ -20,6 +20,7 @@ from silmaril_security.sdk import (
     PromptBlockedException,
     SilmarilApiError,
 )
+from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
 
 TEST_API_URL = "https://api.test.invalid/classify"
 
@@ -92,6 +93,8 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
     assert fw._session.headers["content-type"] == "application/json"
     assert calls[0]["url"] == TEST_API_URL
     assert calls[0]["timeout"] == 10.0
+    assert calls[0]["allow_redirects"] is False
+    assert calls[0]["stream"] is True
     assert calls[0]["data"] == (
         '{"text": "hello", "threshold": 0.5, '
         '"hook": "user_input", "tool_name": "chat"}'
@@ -394,6 +397,43 @@ def test_api_error_on_non_retryable_status(monkeypatch):
     assert exc_info.value.status == 401
     assert exc_info.value.status_text == "Unauthorized"
     assert exc_info.value.body == "bad key"
+    assert "bad key" not in str(exc_info.value)
+
+
+def test_api_error_on_redirect_status(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append(kwargs)
+        return FakeResponse(302, "redirect", reason="Found", headers={"Location": "https://evil.test/"})
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    with pytest.raises(SilmarilApiError) as exc_info:
+        fw.classify("hello")
+
+    assert calls[0]["allow_redirects"] is False
+    assert exc_info.value.status == 302
+    assert exc_info.value.status_text == "Found"
+    assert exc_info.value.body == "redirect"
+
+
+def test_api_error_body_is_capped_and_redacted(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, max_retries=0)
+    body = "x" * (_MAX_ERROR_BODY_BYTES + 1024)
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        return FakeResponse(500, body, reason="Internal Server Error")
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    with pytest.raises(SilmarilApiError) as exc_info:
+        fw.classify("hello")
+
+    assert exc_info.value.body == body[:_MAX_ERROR_BODY_BYTES]
+    assert len(exc_info.value.body) == _MAX_ERROR_BODY_BYTES
+    assert body[:128] not in str(exc_info.value)
 
 
 def test_network_error_retries_then_raises(monkeypatch):
@@ -409,31 +449,3 @@ def test_network_error_retries_then_raises(monkeypatch):
     with pytest.raises(requests.Timeout):
         fw.classify("hello")
     assert sleeps == [1]
-
-
-def test_explain_wire_shape(monkeypatch):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
-    calls: list[dict[str, Any]] = []
-
-    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        calls.append(kwargs)
-        return FakeResponse(
-            200,
-            {
-                "tokens": ["hello"],
-                "attributions": [0.1],
-                "score": 0.2,
-                "prediction": "BENIGN",
-                "prepared_text": "hello",
-            },
-        )
-
-    monkeypatch.setattr(fw._session, "post", fake_post)
-
-    result = fw.explain("hello", hook=HookLabel.USER_INPUT, steps=100, temperature=1.0)
-
-    assert result.prediction == "BENIGN"
-    assert calls[0]["data"] == (
-        '{"explain": true, "text": "hello", "hook": "user_input", '
-        '"steps": 100, "temperature": 1.0}'
-    )

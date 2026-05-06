@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,7 @@ from silmaril_security.sdk import (
     PromptBlockedException,
     SilmarilApiError,
 )
+from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
 
 pytest.importorskip("langchain_core.callbacks")
 
@@ -158,3 +160,65 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
         assert "texts" not in payload
         assert payload["hook"] == "user_input"
         assert payload["tool_name"] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_rejects_redirects():
+    from silmaril_security.sdk.langchain import _async_post_json
+
+    class FakeAsyncResponse:
+        status_code = 302
+        headers: dict[str, str] = {}
+        reason_phrase = "Found"
+        text = "redirect"
+
+        async def aclose(self) -> None:
+            pass
+
+    class FakeAsyncClient:
+        calls: list[dict[str, Any]]
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def post(self, url: str, **kwargs: Any) -> FakeAsyncResponse:
+            self.calls.append({"url": url, **kwargs})
+            return FakeAsyncResponse()
+
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    client = FakeAsyncClient()
+
+    with pytest.raises(SilmarilApiError) as exc_info:
+        await _async_post_json(client, fw, {"text": "hello", "threshold": 0.5})
+
+    assert client.calls[0]["follow_redirects"] is False
+    assert exc_info.value.status == 302
+    assert exc_info.value.body == "redirect"
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_caps_error_body_and_redacts_message():
+    from silmaril_security.sdk.langchain import _async_post_json
+
+    body = "x" * (_MAX_ERROR_BODY_BYTES + 1024)
+
+    class FakeAsyncResponse:
+        status_code = 500
+        headers: dict[str, str] = {}
+        reason_phrase = "Internal Server Error"
+        text = body
+
+        async def aclose(self) -> None:
+            pass
+
+    class FakeAsyncClient:
+        async def post(self, url: str, **kwargs: Any) -> FakeAsyncResponse:
+            return FakeAsyncResponse()
+
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify", max_retries=0)
+
+    with pytest.raises(SilmarilApiError) as exc_info:
+        await _async_post_json(FakeAsyncClient(), fw, {"text": "hello", "threshold": 0.5})
+
+    assert exc_info.value.body == body[:_MAX_ERROR_BODY_BYTES]
+    assert body[:128] not in str(exc_info.value)

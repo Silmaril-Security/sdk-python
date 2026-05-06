@@ -25,7 +25,6 @@ from silmaril_security.sdk.types import (
     BlockedBatchItem,
     BlockResult,
     ClassifyEvent,
-    ExplainResult,
     Prediction,
 )
 
@@ -37,6 +36,7 @@ DEFAULT_MAX_RETRIES = 5
 DEFAULT_CHUNK_CONCURRENCY = 8
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _MAX_BACKOFF_SECONDS = 30.0
+_MAX_ERROR_BODY_BYTES = 1 << 16
 
 
 def _validate_threshold(name: str, value: float) -> None:
@@ -85,6 +85,39 @@ def _retry_after_seconds(value: str | None) -> float | None:
         delay = when.timestamp() - time.time()
         return max(delay, 0.0)
     return float(seconds) if seconds >= 0 else None
+
+
+def _read_capped_error_body(response: Any, limit: int = _MAX_ERROR_BODY_BYTES) -> str:
+    try:
+        if hasattr(response, "iter_content"):
+            chunks: list[bytes] = []
+            remaining = limit
+            for chunk in response.iter_content(chunk_size=min(8192, limit)):
+                if not chunk:
+                    continue
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                if len(chunk) > remaining:
+                    chunks.append(chunk[:remaining])
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+                if remaining <= 0:
+                    break
+            return b"".join(chunks).decode("utf-8", errors="replace")
+        return str(response.text)[:limit]
+    except Exception:
+        return ""
+
+
+def _close_response(response: Any) -> None:
+    close = getattr(response, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:
+        pass
 
 
 class Firewall:
@@ -217,40 +250,6 @@ class Firewall:
             raise BatchPromptBlockedException(blocked=blocked, results=results)
         return results
 
-    def explain(
-        self,
-        text: str,
-        *,
-        hook: HookLabel | str | None = None,
-        tool_name: str | None = None,
-        steps: int = 50,
-        temperature: float | None = None,
-    ) -> ExplainResult:
-        """Compute token-level attributions for a single text."""
-        payload: dict[str, Any] = {"explain": True, "text": text}
-        hook_str = hook_value(hook)
-        if hook_str:
-            payload["hook"] = hook_str
-        if tool_name:
-            payload["tool_name"] = tool_name
-        if steps != 50:
-            payload["steps"] = steps
-        if temperature is not None:
-            payload["temperature"] = temperature
-        data = self._post_json(payload)
-        prediction = data["prediction"]
-        if prediction not in ("BENIGN", "MALICIOUS"):
-            raise ValueError(f"Firewall: invalid prediction {prediction!r}")
-        return ExplainResult(
-            tokens=data["tokens"],
-            attributions=data["attributions"],
-            score=float(data["score"]),
-            prediction=prediction,
-            prepared_text=data["prepared_text"],
-            primary_outcome=data.get("primary_outcome"),
-            outcome_scores=_parse_outcome_scores(data),
-        )
-
     def effective_threshold(self, hook: HookLabel | str | None = None) -> float:
         """Return the threshold that applies to a hook."""
         hook_str = hook_value(hook)
@@ -381,6 +380,8 @@ class Firewall:
                     self.api_url,
                     data=body,
                     timeout=self.timeout,
+                    allow_redirects=False,
+                    stream=True,
                 )
             except requests.RequestException:
                 if attempt < self.max_retries:
@@ -389,13 +390,12 @@ class Firewall:
                 raise
 
             if response.status_code in _RETRYABLE_STATUS_CODES and attempt < self.max_retries:
+                _close_response(response)
                 self._sleep_before_retry(attempt, response)
                 continue
-            if response.status_code >= 400:
-                try:
-                    error_body = response.text
-                except Exception:
-                    error_body = ""
+            if response.status_code >= 300:
+                error_body = _read_capped_error_body(response)
+                _close_response(response)
                 raise SilmarilApiError(
                     status=response.status_code,
                     status_text=getattr(response, "reason", "") or "",

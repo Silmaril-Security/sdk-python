@@ -24,19 +24,6 @@ class BlockResult:
 
 
 @dataclass(frozen=True)
-class ExplainResult:
-    """Token-level attribution result from the explain endpoint."""
-
-    tokens: list[str]
-    attributions: list[float]
-    score: float
-    prediction: Prediction
-    prepared_text: str
-    primary_outcome: str | None = None
-    outcome_scores: dict[str, float] | None = None
-
-
-@dataclass(frozen=True)
 class ClassifyEvent:
     """Classification decision emitted by direct calls and adapters."""
 

@@ -35,7 +35,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.1.1
+pip install silmaril-security-sdk==0.2.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -217,7 +217,7 @@ tool metadata as structured JSON fields, so normal callers should use the
 
 ## Errors
 
-- `SilmarilApiError`: raised when the firewall API responds with a non-2xx status. Carries `status`, `status_text`, and `body`.
+- `SilmarilApiError`: raised when the firewall API responds with a non-2xx or redirect status. Carries `status`, `status_text`, and a 64 KiB-capped `body`; the default exception message omits the body to keep logs clean.
 - `PromptBlockedException`: raised by `classify()` in enforcement mode when the score meets or exceeds the effective threshold. Carries `score`, `threshold`, `prompt_text`, `hook`, `tool_name`, and `result`.
 - `BatchPromptBlockedException`: raised by `classify_batch()` in enforcement mode when one or more inputs meet or exceed the effective threshold. Carries all blocked items with index, text, hook, tool name, and result.
 
