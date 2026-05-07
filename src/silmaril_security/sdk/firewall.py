@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -30,7 +31,9 @@ from silmaril_security.sdk.types import (
 
 LOG = logging.getLogger("silmaril_security.sdk")
 
-DEFAULT_THRESHOLD = 0.5
+BASE_THRESHOLD = 0.5
+TARGET_SEQUENCE_FPR = 0.01
+MAX_ADAPTIVE_THRESHOLD = 0.9
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_CHUNK_CONCURRENCY = 8
@@ -39,9 +42,16 @@ _MAX_BACKOFF_SECONDS = 30.0
 _MAX_ERROR_BODY_BYTES = 1 << 16
 
 
-def _validate_threshold(name: str, value: float) -> None:
-    if value < 0.0 or value > 1.0:
-        raise ValueError(f"Firewall: {name} must be between 0 and 1, got {value}")
+def adaptive_threshold(chunk_count: int) -> float:
+    """Return the internal score threshold for a scoring-opportunity count."""
+    if chunk_count < 1:
+        raise ValueError(f"Firewall: chunk_count must be >= 1, got {chunk_count}")
+    if chunk_count == 1:
+        return BASE_THRESHOLD
+    target_chunk_fpr = 1.0 - math.pow(1.0 - TARGET_SEQUENCE_FPR, 1.0 / chunk_count)
+    odds_ratio = TARGET_SEQUENCE_FPR / target_chunk_fpr
+    raw_threshold = odds_ratio / (1.0 + odds_ratio)
+    return min(raw_threshold, MAX_ADAPTIVE_THRESHOLD)
 
 
 def _parse_outcome_scores(data: dict[str, Any]) -> dict[str, float] | None:
@@ -128,9 +138,7 @@ class Firewall:
         *,
         api_key: str,
         api_url: str,
-        threshold: float = DEFAULT_THRESHOLD,
         timeout: float = DEFAULT_TIMEOUT,
-        hook_thresholds: dict[HookLabel | str, float] | None = None,
         shadow_mode: bool = False,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         session: requests.Session | None = None,
@@ -141,7 +149,6 @@ class Firewall:
             raise ValueError("Firewall: api_key is required")
         if not api_url:
             raise ValueError("Firewall: api_url is required")
-        _validate_threshold("threshold", threshold)
         if timeout < 0:
             raise ValueError(f"Firewall: timeout must be non-negative, got {timeout}")
         if max_retries < 0:
@@ -151,19 +158,9 @@ class Firewall:
                 f"Firewall: chunk_concurrency must be >= 1, got {chunk_concurrency}"
             )
 
-        normalized_hook_thresholds: dict[str, float] = {}
-        for hook, hook_threshold in (hook_thresholds or {}).items():
-            _validate_threshold(f"hook_thresholds[{hook!r}]", hook_threshold)
-            value = hook_value(hook)
-            if value is None:
-                continue
-            normalized_hook_thresholds[value] = hook_threshold
-
         self.api_key = api_key
         self.api_url = api_url
-        self.threshold = threshold
         self.timeout = timeout
-        self.hook_thresholds = normalized_hook_thresholds
         self.shadow_mode = shadow_mode
         self.on_classify = on_classify
         self.max_retries = max_retries
@@ -184,9 +181,8 @@ class Firewall:
         tool_name: str | None = None,
         shadow_mode: bool | None = None,
     ) -> BlockResult:
-        """Classify a single text and enforce the effective threshold."""
-        threshold = self.effective_threshold(hook)
-        result = self._classify_raw(text, hook=hook, tool_name=tool_name, threshold=threshold)
+        """Classify a single text and enforce the internal adaptive threshold."""
+        result = self._classify_raw(text, hook=hook, tool_name=tool_name)
         event = self._new_classify_event(
             text=text,
             hook=hook,
@@ -212,16 +208,13 @@ class Firewall:
         *,
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
-        threshold: float | None = None,
         shadow_mode: bool | None = None,
     ) -> list[BlockResult]:
-        """Classify multiple independent texts and enforce thresholds."""
-        threshold_value = self._batch_threshold(hooks, threshold)
+        """Classify multiple independent texts and enforce adaptive thresholds."""
         results = self._classify_batch_raw(
             texts,
             hooks=hooks,
             tool_names=tool_names,
-            threshold=threshold_value,
         )
         effective_shadow = self._effective_shadow_mode(shadow_mode)
         blocked: list[BlockedBatchItem] = []
@@ -250,13 +243,6 @@ class Firewall:
             raise BatchPromptBlockedException(blocked=blocked, results=results)
         return results
 
-    def effective_threshold(self, hook: HookLabel | str | None = None) -> float:
-        """Return the threshold that applies to a hook."""
-        hook_str = hook_value(hook)
-        if hook_str and hook_str in self.hook_thresholds:
-            return self.hook_thresholds[hook_str]
-        return self.threshold
-
     def as_langchain_handler(self, **options: Any) -> Any:
         """Create a synchronous LangChain callback handler."""
         from silmaril_security.sdk.langchain import SilmarilFirewallHandler
@@ -275,11 +261,9 @@ class Firewall:
         *,
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
-        threshold: float | None = None,
     ) -> BlockResult:
-        threshold_value = self.effective_threshold(hook) if threshold is None else threshold
-        _validate_threshold("threshold", threshold_value)
         chunks = chunk_text(text)
+        threshold_value = adaptive_threshold(len(chunks))
         if len(chunks) == 1:
             return self._classify_single_raw(
                 chunks[0],
@@ -326,7 +310,6 @@ class Firewall:
         *,
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
-        threshold: float | None = None,
     ) -> list[BlockResult]:
         text_list = list(texts)
         if not text_list:
@@ -341,7 +324,7 @@ class Firewall:
                 f"{len(tool_names)} does not match texts length {len(text_list)}"
             )
 
-        threshold_value = self._batch_threshold(hooks, threshold)
+        threshold_value = adaptive_threshold(len(text_list))
         payload: dict[str, Any] = {"texts": text_list, "threshold": threshold_value}
         if hooks:
             payload["hooks"] = [hook_value(h) for h in hooks]
@@ -356,21 +339,6 @@ class Firewall:
                 f"{len(predictions)} does not match texts length {len(text_list)}"
             )
         return [_block_result_from_json(item, threshold_value) for item in predictions]
-
-    def _batch_threshold(
-        self,
-        hooks: Sequence[HookLabel | str] | None,
-        threshold: float | None,
-    ) -> float:
-        if threshold is not None:
-            _validate_threshold("batch threshold", threshold)
-            return threshold
-        if not hooks:
-            return self.threshold
-        first = hook_value(hooks[0])
-        if all(hook_value(hook) == first for hook in hooks):
-            return self.effective_threshold(first)
-        return self.threshold
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)

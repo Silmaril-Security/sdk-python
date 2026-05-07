@@ -22,7 +22,7 @@ from silmaril_security.sdk._utils import (
     get_role,
 )
 from silmaril_security.sdk.exceptions import PromptBlockedException
-from silmaril_security.sdk.firewall import Firewall
+from silmaril_security.sdk.firewall import Firewall, adaptive_threshold
 from silmaril_security.sdk.hooks import (
     FIREWALL_HOOK_TO_LABEL,
     FirewallHook,
@@ -56,8 +56,6 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         self,
         firewall: Firewall,
         *,
-        threshold: float | None = None,
-        hook_thresholds: dict[HookLabel | str, float] | None = None,
         hooks: Iterable[FirewallHook | str] | None = None,
         include_system: bool = True,
         include_tool: bool = True,
@@ -68,11 +66,6 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
     ) -> None:
         super().__init__()
         self.firewall = firewall
-        self.threshold = threshold
-        self.hook_thresholds = {
-            (k.value if isinstance(k, HookLabel) else str(k)): v
-            for k, v in (hook_thresholds or {}).items()
-        }
         self._enabled_hooks = resolve_hooks(hooks)
         self.include_system = include_system
         self.include_tool = include_tool
@@ -80,13 +73,6 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         self.shadow_mode = firewall.shadow_mode if shadow_mode is None else shadow_mode
         self.on_classify = on_classify
         self.logger = logger or LOG
-
-    def _effective_threshold(self, hook: HookLabel) -> float:
-        if hook.value in self.hook_thresholds:
-            return self.hook_thresholds[hook.value]
-        if hook.value in self.firewall.hook_thresholds:
-            return self.firewall.hook_thresholds[hook.value]
-        return self.threshold if self.threshold is not None else self.firewall.threshold
 
     def _fire_on_classify(self, event: ClassifyEvent) -> None:
         if self.on_classify is None:
@@ -103,13 +89,11 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         hook_label: HookLabel,
         tool_name: str | None = None,
     ) -> None:
-        threshold = self._effective_threshold(hook_label)
         try:
             result = self.firewall._classify_raw(
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
-                threshold=threshold,
             )
         except Exception:
             if not self.fail_open:
@@ -266,8 +250,6 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         self,
         firewall: Firewall,
         *,
-        threshold: float | None = None,
-        hook_thresholds: dict[HookLabel | str, float] | None = None,
         hooks: Iterable[FirewallHook | str] | None = None,
         include_system: bool = True,
         include_tool: bool = True,
@@ -279,8 +261,6 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         super().__init__()
         self._sync_handler = SilmarilFirewallHandler(
             firewall,
-            threshold=threshold,
-            hook_thresholds=hook_thresholds,
             hooks=hooks,
             include_system=include_system,
             include_tool=include_tool,
@@ -309,14 +289,12 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         hook_label: HookLabel,
         tool_name: str | None = None,
     ) -> None:
-        threshold = self._sync_handler._effective_threshold(hook_label)
         try:
             result = await _async_classify_raw(
                 self._sync_handler.firewall,
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
-                threshold=threshold,
             )
         except Exception:
             if not self._sync_handler.fail_open:
@@ -462,7 +440,6 @@ async def _async_classify_raw(
     *,
     hook: HookLabel | str | None,
     tool_name: str | None,
-    threshold: float,
 ) -> BlockResult:
     import asyncio
 
@@ -472,6 +449,7 @@ async def _async_classify_raw(
     from silmaril_security.sdk.hooks import hook_value
 
     chunks = __import__("silmaril_security.sdk.chunking", fromlist=["chunk_text"]).chunk_text(text)
+    threshold = adaptive_threshold(len(chunks))
     headers = {"x-api-key": firewall.api_key, "content-type": "application/json"}
     async with httpx.AsyncClient(
         headers=headers,

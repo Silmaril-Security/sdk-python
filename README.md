@@ -18,8 +18,8 @@ This SDK provides the low-level Python interface for that workflow:
 - Classify user input, tool calls, tool responses, model output, or system
   prompt content.
 - Preserve hook and tool-name context for more accurate decisions.
-- Enforce configurable default and per-hook thresholds, with shadow mode for
-  observation-only rollout.
+- Enforce automatic adaptive thresholds, with shadow mode for observation-only
+  rollout.
 - Chunk long inputs consistently before they reach the API.
 - Retry transient API Gateway and model-serving failures.
 - Optionally attach the firewall to LangChain callback flows.
@@ -35,7 +35,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.2.0
+pip install silmaril-security-sdk==0.3.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -115,10 +115,8 @@ except PromptBlockedException as exc:
 Firewall(
     api_key: str,                                  # required
     api_url: str,                                  # required
-    threshold: float = 0.5,                        # default threshold; 0 blocks everything
     timeout: float = 10.0,                         # request timeout in seconds
     chunk_concurrency: int = 8,                    # long-input chunk fanout limit
-    hook_thresholds: dict[HookLabel | str, float] | None = None,
     shadow_mode: bool = False,                     # observe without blocking when true
     on_classify: Callable[[ClassifyEvent], None] | None = None,
     session: requests.Session | None = None,       # optional custom requests session
@@ -126,23 +124,25 @@ Firewall(
 )
 ```
 
-`classify()` sends the effective threshold for the supplied hook to the API and
-returns the server's prediction, score, and applied threshold. By default,
-`classify()` and `classify_batch()` raise a typed blocking exception when
-`score >= threshold`.
-
-To set a threshold:
-
-```python
-fw = Firewall(
-    api_key=api_key,
-    api_url=api_url,
-    threshold=0.0,
-)
-```
+`classify()` and `classify_batch()` return the server's prediction, score, and
+the threshold applied internally for that scoring operation. By default, both
+methods raise a typed blocking exception when `score >= threshold`.
 
 When a custom `requests.Session` is provided, the SDK preserves it and adds the
 required `x-api-key` and `content-type` headers.
+
+## Automatic Thresholding
+
+Customers do not tune score thresholds. Short inputs use the base threshold
+`0.5`, which corresponds to the SDK's default single-chunk operating point.
+When a call creates more scoring opportunities, the SDK raises the internal
+threshold before sending requests to `/classify`: 2 chunks use about `0.6661`,
+5 chunks use about `0.8328`, and 10 or more opportunities are capped at `0.9`.
+
+For `classify()`, the scoring-opportunity count is the number of generated
+chunks. For `classify_batch()`, it is the number of texts in the batch. The
+applied value remains available on `BlockResult.threshold` and exception
+objects as diagnostic metadata.
 
 ## Shadow Mode
 
@@ -207,9 +207,6 @@ HookLabel.LLM_OUTPUT     # "llm_output"
 HookLabel.UNKNOWN        # "unknown"
 ```
 
-`DEFAULT_HOOK_THRESHOLDS.copy()` returns a fresh copy of the default score
-threshold map.
-
 `prepend_hook()` and `prepend_tool_name()` are legacy helpers for manual
 text-prefix integrations. `classify()` and `classify_batch()` send hook and
 tool metadata as structured JSON fields, so normal callers should use the
@@ -259,9 +256,15 @@ else:
     print(f"classified {len(results)} items")
 ```
 
-Batch requests carry one threshold. If all batch hooks are the same, the SDK
-uses that hook's effective threshold; mixed-hook batches use the client default
-threshold unless the `threshold` argument is supplied.
+Batch requests carry one internal threshold based on batch size. Thresholds are
+not accepted as a client option or per-call batch override.
+
+## Migration Notes
+
+Version `0.3.0` removes the customer-facing `threshold`, `hook_thresholds`, and
+batch threshold override configuration. Existing enforcement, shadow mode,
+hook metadata, result threshold diagnostics, and typed blocking exceptions
+remain available.
 
 ## LangChain
 

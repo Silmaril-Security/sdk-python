@@ -16,7 +16,7 @@ from silmaril_security.sdk import (
     PromptBlockedException,
     SilmarilApiError,
 )
-from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
+from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES, adaptive_threshold
 
 pytest.importorskip("langchain_core.callbacks")
 
@@ -27,9 +27,9 @@ def test_langchain_handler_blocks_last_user_message(monkeypatch):
     handler = fw.as_langchain_handler(on_classify=events.append)
     calls = []
 
-    def fake_raw(text, *, hook=None, tool_name=None, threshold=None):
-        calls.append((text, hook, tool_name, threshold))
-        return BlockResult(prediction="MALICIOUS", score=0.9, threshold=threshold)
+    def fake_raw(text, *, hook=None, tool_name=None):
+        calls.append((text, hook, tool_name))
+        return BlockResult(prediction="MALICIOUS", score=0.9, threshold=adaptive_threshold(1))
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
 
@@ -47,7 +47,7 @@ def test_langchain_handler_blocks_last_user_message(monkeypatch):
             run_id=uuid4(),
         )
 
-    assert calls == [("second", HookLabel.USER_INPUT, None, 0.5)]
+    assert calls == [("second", HookLabel.USER_INPUT, None)]
     assert len(events) == 1
     assert events[0].blocked is True
 
@@ -56,7 +56,7 @@ def test_langchain_handler_fail_open(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler()
 
-    def fake_raw(text, *, hook=None, tool_name=None, threshold=None):
+    def fake_raw(text, *, hook=None, tool_name=None):
         raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
@@ -72,7 +72,7 @@ def test_langchain_handler_fail_closed(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler(fail_open=False)
 
-    def fake_raw(text, *, hook=None, tool_name=None, threshold=None):
+    def fake_raw(text, *, hook=None, tool_name=None):
         raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
@@ -95,8 +95,8 @@ async def test_async_langchain_handler_supports_async_callback(monkeypatch):
 
     handler = fw.as_async_langchain_handler(on_classify=on_classify, shadow_mode=True)
 
-    async def fake_async_raw(firewall, text, *, hook=None, tool_name=None, threshold=None):
-        return BlockResult(prediction="MALICIOUS", score=0.9, threshold=threshold)
+    async def fake_async_raw(firewall, text, *, hook=None, tool_name=None):
+        return BlockResult(prediction="MALICIOUS", score=0.9, threshold=adaptive_threshold(1))
 
     monkeypatch.setattr("silmaril_security.sdk.langchain._async_classify_raw", fake_async_raw)
 
@@ -149,17 +149,18 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
         "a" * (CHUNK_WINDOW_CHARS * 3),
         hook=HookLabel.USER_INPUT,
         tool_name="chat",
-        threshold=0.5,
     )
 
     assert result.score == 0.95
     assert len(payloads) > 1
     assert max_active <= 2
+    threshold = adaptive_threshold(len(payloads))
     for payload in payloads:
         assert "text" in payload
         assert "texts" not in payload
         assert payload["hook"] == "user_input"
         assert payload["tool_name"] == "chat"
+        assert payload["threshold"] == threshold
 
 
 @pytest.mark.asyncio

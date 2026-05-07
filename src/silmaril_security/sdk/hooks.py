@@ -64,16 +64,6 @@ FIREWALL_HOOK_TO_LABEL: dict[FirewallHook, HookLabel] = {
     FirewallHook.LLM_END: HookLabel.LLM_OUTPUT,
 }
 
-DEFAULT_HOOK_THRESHOLDS: dict[HookLabel, float] = {
-    HookLabel.USER_INPUT: 0.5,
-    HookLabel.SYSTEM_PROMPT: 0.5,
-    HookLabel.TOOL_CALL: 0.5,
-    HookLabel.TOOL_RESPONSE: 0.5,
-    HookLabel.LLM_OUTPUT: 0.5,
-    HookLabel.UNKNOWN: 0.5,
-}
-
-
 def resolve_hooks(hooks: Iterable[FirewallHook | str] | None) -> frozenset[FirewallHook]:
     """Normalize callback hook values into a frozenset of FirewallHook members."""
     if hooks is None:
@@ -89,7 +79,7 @@ def hook_value(hook: HookLabel | str | None) -> str | None:
 
 
 def normalize_hook_label(hook: HookLabel | str | None) -> HookLabel:
-    """Normalize hook input for events and threshold lookup."""
+    """Normalize hook input for events and structured request metadata."""
     value = hook_value(hook)
     if not value:
         return HookLabel.UNKNOWN

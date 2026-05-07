@@ -5,7 +5,6 @@ import pytest
 from silmaril_security.sdk import (
     CHUNK_OVERLAP_CHARS,
     CHUNK_WINDOW_CHARS,
-    DEFAULT_HOOK_THRESHOLDS,
     FIREWALL_HOOK_TO_LABEL,
     MAX_INPUT_CHARS,
     FirewallHook,
@@ -48,4 +47,3 @@ def test_hooks_and_helpers():
     assert prepend_tool_name("text", None) == "text"
     assert resolve_hooks(None) == {FirewallHook.LLM_START, FirewallHook.CHAT_MODEL_START}
     assert FIREWALL_HOOK_TO_LABEL[FirewallHook.TOOL_END] == HookLabel.TOOL_RESPONSE
-    assert all(value == 0.5 for value in DEFAULT_HOOK_THRESHOLDS.values())

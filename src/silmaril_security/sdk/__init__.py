@@ -23,14 +23,12 @@ from silmaril_security.sdk.exceptions import (
 from silmaril_security.sdk.firewall import (
     DEFAULT_CHUNK_CONCURRENCY,
     DEFAULT_MAX_RETRIES,
-    DEFAULT_THRESHOLD,
     DEFAULT_TIMEOUT,
     Firewall,
     SilmarilFirewall,
 )
 from silmaril_security.sdk.hooks import (
     ALL_HOOKS,
-    DEFAULT_HOOK_THRESHOLDS,
     DEFAULT_HOOKS,
     FIREWALL_HOOK_TO_LABEL,
     INPUT_HOOKS,
@@ -48,7 +46,7 @@ from silmaril_security.sdk.types import (
     Prediction,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ALL_HOOKS",
@@ -64,9 +62,7 @@ __all__ = [
     "ClassifyEvent",
     "DEFAULT_CHUNK_CONCURRENCY",
     "DEFAULT_HOOKS",
-    "DEFAULT_HOOK_THRESHOLDS",
     "DEFAULT_MAX_RETRIES",
-    "DEFAULT_THRESHOLD",
     "DEFAULT_TIMEOUT",
     "FIREWALL_HOOK_TO_LABEL",
     "Firewall",

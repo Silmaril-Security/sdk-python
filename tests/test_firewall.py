@@ -20,7 +20,7 @@ from silmaril_security.sdk import (
     PromptBlockedException,
     SilmarilApiError,
 )
-from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
+from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES, adaptive_threshold
 
 TEST_API_URL = "https://api.test.invalid/classify"
 
@@ -55,15 +55,14 @@ def test_constructor_requires_key_and_url():
         Firewall(api_key="sk", api_url="")
 
 
-def test_constructor_validates_thresholds():
-    with pytest.raises(ValueError, match="threshold"):
-        Firewall(api_key="sk", api_url=TEST_API_URL, threshold=1.5)
-    with pytest.raises(ValueError, match="hook_thresholds"):
-        Firewall(
-            api_key="sk",
-            api_url=TEST_API_URL,
-            hook_thresholds={HookLabel.USER_INPUT: -0.1},
-        )
+def test_adaptive_threshold_schedule():
+    assert adaptive_threshold(1) == 0.5
+    assert adaptive_threshold(2) == pytest.approx(0.6661087830919008)
+    assert adaptive_threshold(5) == pytest.approx(0.8327747955407889)
+    assert adaptive_threshold(10) == 0.9
+    assert adaptive_threshold(100) == 0.9
+    with pytest.raises(ValueError, match="chunk_count"):
+        adaptive_threshold(0)
 
 
 def test_constructor_validates_chunk_concurrency():
@@ -154,26 +153,6 @@ def test_classify_per_call_shadow_mode_override(monkeypatch):
         fw.classify("attack", shadow_mode=False)
 
 
-def test_per_hook_threshold_is_sent_and_enforced(monkeypatch):
-    fw = Firewall(
-        api_key="sk",
-        api_url=TEST_API_URL,
-        hook_thresholds={HookLabel.TOOL_RESPONSE: 0.95},
-    )
-    calls: list[dict[str, Any]] = []
-
-    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        calls.append(kwargs)
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.91})
-
-    monkeypatch.setattr(fw._session, "post", fake_post)
-
-    result = fw.classify("tool output", hook=HookLabel.TOOL_RESPONSE)
-
-    assert result.threshold == 0.95
-    assert '"threshold": 0.95' in calls[0]["data"]
-
-
 def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
     calls: list[dict[str, Any]] = []
@@ -186,7 +165,7 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
                 "predictions": [
                     {"prediction": "MALICIOUS", "score": 0.8},
                     {"prediction": "BENIGN", "score": 0.1},
-                    {"prediction": "MALICIOUS", "score": 0.7},
+                    {"prediction": "MALICIOUS", "score": 0.8},
                 ]
             },
         )
@@ -203,8 +182,9 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     assert len(exc_info.value.results) == 3
     assert [item.index for item in exc_info.value.blocked] == [0, 2]
     assert exc_info.value.blocked[0].tool_name == "chat"
+    threshold = adaptive_threshold(3)
     assert calls[0]["data"] == (
-        '{"texts": ["first", "second", "third"], "threshold": 0.5, '
+        f'{{"texts": ["first", "second", "third"], "threshold": {threshold}, '
         '"hooks": ["user_input", "tool_response", "tool_response"], '
         '"tool_names": ["chat", "read_file", null]}'
     )
@@ -257,12 +237,13 @@ def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
     assert result.prediction == "MALICIOUS"
     assert result.score == 0.95
     assert len(calls) > 1
+    threshold = adaptive_threshold(len(calls))
     for call in calls:
         body = json.loads(call["data"])
         assert "text" in body
         assert "texts" not in body
         assert body["hook"] == "user_input"
-        assert body["threshold"] == 0.5
+        assert body["threshold"] == threshold
 
 
 def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
