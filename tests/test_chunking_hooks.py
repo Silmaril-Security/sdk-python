@@ -3,10 +3,12 @@
 import pytest
 
 from silmaril_security.sdk import (
+    CHARS_PER_TOKEN,
     CHUNK_OVERLAP_CHARS,
     CHUNK_WINDOW_CHARS,
     FIREWALL_HOOK_TO_LABEL,
     MAX_INPUT_CHARS,
+    MAX_INPUT_TOKENS,
     FirewallHook,
     HookLabel,
     chunk_text,
@@ -22,6 +24,12 @@ def test_namespace_import_exports_expected_symbols():
     assert sdk.Firewall is not None
     assert sdk.SilmarilFirewall is sdk.Firewall
     assert sdk.HookLabel.USER_INPUT == "user_input"
+
+
+def test_chunking_constants_pin_large_payload_limit():
+    assert MAX_INPUT_TOKENS == 81_920
+    assert MAX_INPUT_CHARS == 327_680
+    assert MAX_INPUT_CHARS == MAX_INPUT_TOKENS * CHARS_PER_TOKEN
 
 
 def test_chunk_text_short_input():

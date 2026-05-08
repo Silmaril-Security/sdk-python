@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "silmaril-security-sdk"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python SDK for Silmaril Firewall prompt injection and jailbreak detection"
 authors = [
     { name = "Silmaril Security Inc", email = "engineering@silmarilsecurity.com" }

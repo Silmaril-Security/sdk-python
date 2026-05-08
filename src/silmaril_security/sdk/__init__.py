@@ -46,7 +46,7 @@ from silmaril_security.sdk.types import (
     Prediction,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "ALL_HOOKS",

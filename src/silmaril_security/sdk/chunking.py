@@ -6,7 +6,7 @@ from __future__ import annotations
 
 CHARS_PER_TOKEN = 4
 
-MAX_INPUT_TOKENS = 10_240
+MAX_INPUT_TOKENS = 81_920
 CHUNK_WINDOW = 400
 CHUNK_OVERLAP = 64
 
