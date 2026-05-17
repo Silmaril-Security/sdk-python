@@ -149,6 +149,7 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
         "a" * (CHUNK_WINDOW_CHARS * 3),
         hook=HookLabel.USER_INPUT,
         tool_name="chat",
+        metadata={"langgraph": {"run_id": "async-run"}},
     )
 
     assert result.score == 0.95
@@ -160,6 +161,7 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
         assert "texts" not in payload
         assert payload["hook"] == "user_input"
         assert payload["tool_name"] == "chat"
+        assert payload["metadata"] == {"langgraph": {"run_id": "async-run"}}
         assert payload["threshold"] == threshold
 
 

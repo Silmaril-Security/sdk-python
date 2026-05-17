@@ -29,7 +29,7 @@ from silmaril_security.sdk.hooks import (
     HookLabel,
     resolve_hooks,
 )
-from silmaril_security.sdk.types import BlockResult, ClassifyEvent
+from silmaril_security.sdk.types import BlockResult, ClassificationMetadata, ClassifyEvent
 
 try:
     from langchain_core.callbacks import AsyncCallbackHandler, BaseCallbackHandler
@@ -440,6 +440,7 @@ async def _async_classify_raw(
     *,
     hook: HookLabel | str | None,
     tool_name: str | None,
+    metadata: ClassificationMetadata | None = None,
 ) -> BlockResult:
     import asyncio
 
@@ -463,6 +464,8 @@ async def _async_classify_raw(
                 payload["hook"] = hook_str
             if tool_name:
                 payload["tool_name"] = tool_name
+            if metadata is not None:
+                payload["metadata"] = dict(metadata)
             data = await _async_post_json(client, firewall, payload)
             return _block_result_from_json(data, threshold)
 
@@ -475,6 +478,8 @@ async def _async_classify_raw(
                 payload["hook"] = hook_str
             if tool_name:
                 payload["tool_name"] = tool_name
+            if metadata is not None:
+                payload["metadata"] = dict(metadata)
             async with semaphore:
                 data = await _async_post_json(client, firewall, payload)
             return _block_result_from_json(data, threshold)

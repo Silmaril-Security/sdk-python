@@ -35,7 +35,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.3.1
+pip install silmaril-security-sdk==0.3.2
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -94,6 +94,13 @@ try:
     user_result = fw.classify(
         "What is the capital of France?",
         hook=HookLabel.USER_INPUT,
+        metadata={
+            "langgraph": {
+                "thread_id": "thread-123",
+                "run_id": "run-123",
+                "message_id": "msg-123",
+            }
+        },
     )
 except PromptBlockedException as exc:
     raise RuntimeError("unexpected block") from exc
@@ -212,6 +219,39 @@ text-prefix integrations. `classify()` and `classify_batch()` send hook and
 tool metadata as structured JSON fields, so normal callers should use the
 `hook`, `tool_name`, `hooks`, and `tool_names` parameters.
 
+## Request Metadata
+
+Use `metadata` to forward application or integration identifiers to the
+classification API without embedding them in the classified text:
+
+```python
+fw.classify(
+    text,
+    hook=HookLabel.USER_INPUT,
+    metadata={
+        "langgraph": {
+            "thread_id": "customer-thread-123",
+            "run_id": "langgraph-run-456",
+            "message_id": "message-789",
+        }
+    },
+)
+```
+
+Batch calls accept one metadata object per text. The metadata list must match
+the number of texts; use `None` for entries without metadata:
+
+```python
+fw.classify_batch(
+    [text1, text2],
+    hooks=[HookLabel.USER_INPUT, HookLabel.TOOL_RESPONSE],
+    metadata=[
+        {"langgraph": {"run_id": "run-a"}},
+        None,
+    ],
+)
+```
+
 ## Errors
 
 - `SilmarilApiError`: raised when the firewall API responds with a non-2xx or redirect status. Carries `status`, `status_text`, and a 64 KiB-capped `body`; the default exception message omits the body to keep logs clean.
@@ -256,8 +296,9 @@ else:
     print(f"classified {len(results)} items")
 ```
 
-Batch requests carry one internal threshold based on batch size. Thresholds are
-not accepted as a client option or per-call batch override.
+Batch requests carry one internal threshold based on batch size. Hook, tool-name,
+and metadata arrays must match the number of texts. Thresholds are not accepted
+as a client option or per-call batch override.
 
 ## Migration Notes
 

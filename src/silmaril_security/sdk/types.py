@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from silmaril_security.sdk.hooks import HookLabel
 
 Prediction = Literal["BENIGN", "MALICIOUS"]
+ClassificationMetadata = Mapping[str, Any]
 
 
 @dataclass(frozen=True)

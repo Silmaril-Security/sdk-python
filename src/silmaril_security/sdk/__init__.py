@@ -42,11 +42,12 @@ from silmaril_security.sdk.hooks import (
 from silmaril_security.sdk.types import (
     BlockedBatchItem,
     BlockResult,
+    ClassificationMetadata,
     ClassifyEvent,
     Prediction,
 )
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 __all__ = [
     "ALL_HOOKS",
@@ -59,6 +60,7 @@ __all__ = [
     "CHUNK_OVERLAP_CHARS",
     "CHUNK_WINDOW",
     "CHUNK_WINDOW_CHARS",
+    "ClassificationMetadata",
     "ClassifyEvent",
     "DEFAULT_CHUNK_CONCURRENCY",
     "DEFAULT_HOOKS",

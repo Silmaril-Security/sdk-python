@@ -100,6 +100,42 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
     )
 
 
+def test_classify_posts_metadata_when_provided(monkeypatch):
+    fw = Firewall(api_key="sk-test", api_url=TEST_API_URL)
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append({"url": url, **kwargs})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.12})
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    fw.classify(
+        "hello",
+        hook=HookLabel.USER_INPUT,
+        metadata={
+            "langgraph": {
+                "thread_id": "thread-123",
+                "run_id": "run-123",
+                "message_id": "msg-123",
+            }
+        },
+    )
+
+    assert json.loads(calls[0]["data"]) == {
+        "text": "hello",
+        "threshold": 0.5,
+        "hook": "user_input",
+        "metadata": {
+            "langgraph": {
+                "thread_id": "thread-123",
+                "run_id": "run-123",
+                "message_id": "msg-123",
+            }
+        },
+    }
+
+
 def test_classify_enforces_by_default(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
 
@@ -190,6 +226,34 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     )
 
 
+def test_classify_batch_serializes_metadata(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append(kwargs)
+        return FakeResponse(
+            200,
+            {"predictions": [{"prediction": "BENIGN", "score": 0.1}] * 2},
+        )
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    fw.classify_batch(
+        ["first", "second"],
+        metadata=[
+            {"langgraph": {"run_id": "run-a"}},
+            None,
+        ],
+    )
+
+    assert json.loads(calls[0]["data"]) == {
+        "texts": ["first", "second"],
+        "threshold": adaptive_threshold(2),
+        "metadata": [{"langgraph": {"run_id": "run-a"}}, None],
+    }
+
+
 def test_classify_batch_shadow_mode_returns_results(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
 
@@ -213,6 +277,8 @@ def test_classify_batch_rejects_bad_lengths():
         fw.classify_batch(["a", "b"], hooks=[HookLabel.USER_INPUT])
     with pytest.raises(ValueError, match="tool_names length 1"):
         fw.classify_batch(["a", "b"], tool_names=["tool"])
+    with pytest.raises(ValueError, match="metadata length 1"):
+        fw.classify_batch(["a", "b"], metadata=[{"run_id": "run-a"}])
     with pytest.raises(ValueError, match="texts must not be empty"):
         fw.classify_batch([])
 
@@ -262,6 +328,7 @@ def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
         "b" * (CHUNK_WINDOW_CHARS * 2),
         hook=HookLabel.TOOL_RESPONSE,
         tool_name="fetch_webpage",
+        metadata={"langgraph": {"run_id": "run-chunked"}},
     )
 
     assert len(calls) > 1
@@ -269,6 +336,7 @@ def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
         body = json.loads(call["data"])
         assert body["hook"] == "tool_response"
         assert body["tool_name"] == "fetch_webpage"
+        assert body["metadata"] == {"langgraph": {"run_id": "run-chunked"}}
         assert "texts" not in body
 
 

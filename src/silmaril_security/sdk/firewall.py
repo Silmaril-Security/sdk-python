@@ -25,6 +25,7 @@ from silmaril_security.sdk.hooks import HookLabel, hook_value, normalize_hook_la
 from silmaril_security.sdk.types import (
     BlockedBatchItem,
     BlockResult,
+    ClassificationMetadata,
     ClassifyEvent,
     Prediction,
 )
@@ -179,10 +180,11 @@ class Firewall:
         *,
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
+        metadata: ClassificationMetadata | None = None,
         shadow_mode: bool | None = None,
     ) -> BlockResult:
         """Classify a single text and enforce the internal adaptive threshold."""
-        result = self._classify_raw(text, hook=hook, tool_name=tool_name)
+        result = self._classify_raw(text, hook=hook, tool_name=tool_name, metadata=metadata)
         event = self._new_classify_event(
             text=text,
             hook=hook,
@@ -208,6 +210,7 @@ class Firewall:
         *,
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
+        metadata: Sequence[ClassificationMetadata | None] | None = None,
         shadow_mode: bool | None = None,
     ) -> list[BlockResult]:
         """Classify multiple independent texts and enforce adaptive thresholds."""
@@ -215,6 +218,7 @@ class Firewall:
             texts,
             hooks=hooks,
             tool_names=tool_names,
+            metadata=metadata,
         )
         effective_shadow = self._effective_shadow_mode(shadow_mode)
         blocked: list[BlockedBatchItem] = []
@@ -261,6 +265,7 @@ class Firewall:
         *,
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
+        metadata: ClassificationMetadata | None = None,
     ) -> BlockResult:
         chunks = chunk_text(text)
         threshold_value = adaptive_threshold(len(chunks))
@@ -269,6 +274,7 @@ class Firewall:
                 chunks[0],
                 hook=hook,
                 tool_name=tool_name,
+                metadata=metadata,
                 threshold=threshold_value,
             )
 
@@ -280,6 +286,7 @@ class Firewall:
                         chunk,
                         hook=hook,
                         tool_name=tool_name,
+                        metadata=metadata,
                         threshold=threshold_value,
                     ),
                     chunks,
@@ -293,6 +300,7 @@ class Firewall:
         *,
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
+        metadata: ClassificationMetadata | None = None,
         threshold: float,
     ) -> BlockResult:
         payload: dict[str, Any] = {"text": text, "threshold": threshold}
@@ -301,6 +309,8 @@ class Firewall:
             payload["hook"] = hook_str
         if tool_name:
             payload["tool_name"] = tool_name
+        if metadata is not None:
+            payload["metadata"] = dict(metadata)
         data = self._post_json(payload)
         return _block_result_from_json(data, threshold)
 
@@ -310,6 +320,7 @@ class Firewall:
         *,
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
+        metadata: Sequence[ClassificationMetadata | None] | None = None,
     ) -> list[BlockResult]:
         text_list = list(texts)
         if not text_list:
@@ -323,6 +334,11 @@ class Firewall:
                 "Firewall: tool_names length "
                 f"{len(tool_names)} does not match texts length {len(text_list)}"
             )
+        if metadata is not None and len(metadata) != len(text_list):
+            raise ValueError(
+                f"Firewall: metadata length {len(metadata)} does not match texts length "
+                f"{len(text_list)}"
+            )
 
         threshold_value = adaptive_threshold(len(text_list))
         payload: dict[str, Any] = {"texts": text_list, "threshold": threshold_value}
@@ -330,6 +346,8 @@ class Firewall:
             payload["hooks"] = [hook_value(h) for h in hooks]
         if tool_names:
             payload["tool_names"] = list(tool_names)
+        if metadata is not None:
+            payload["metadata"] = [dict(item) if item is not None else None for item in metadata]
 
         data = self._post_json(payload)
         predictions = data["predictions"]
