@@ -6,19 +6,21 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 from typing import Any
+from uuid import uuid4
 
 import requests
+from typing_extensions import deprecated
 
+from silmaril_security.sdk._version import VERSION
 from silmaril_security.sdk.chunking import chunk_text
 from silmaril_security.sdk.exceptions import (
-    BatchPromptBlockedException,
-    PromptBlockedException,
+    BatchFirewallBlockedException,
+    FirewallBlockedException,
     SilmarilApiError,
 )
 from silmaril_security.sdk.hooks import HookLabel, hook_value, normalize_hook_label
@@ -32,9 +34,6 @@ from silmaril_security.sdk.types import (
 
 LOG = logging.getLogger("silmaril_security.sdk")
 
-BASE_THRESHOLD = 0.5
-TARGET_SEQUENCE_FPR = 0.01
-MAX_ADAPTIVE_THRESHOLD = 0.9
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_CHUNK_CONCURRENCY = 8
@@ -43,16 +42,19 @@ _MAX_BACKOFF_SECONDS = 30.0
 _MAX_ERROR_BODY_BYTES = 1 << 16
 
 
+@deprecated("Thresholds are tenant-owned by the Firewall backend.")
 def adaptive_threshold(chunk_count: int) -> float:
-    """Return the internal score threshold for a scoring-opportunity count."""
+    """Return the legacy adaptive threshold for a scoring-opportunity count."""
+    import math
+
     if chunk_count < 1:
         raise ValueError(f"Firewall: chunk_count must be >= 1, got {chunk_count}")
     if chunk_count == 1:
-        return BASE_THRESHOLD
-    target_chunk_fpr = 1.0 - math.pow(1.0 - TARGET_SEQUENCE_FPR, 1.0 / chunk_count)
-    odds_ratio = TARGET_SEQUENCE_FPR / target_chunk_fpr
+        return 0.5
+    target_chunk_fpr = 1.0 - math.pow(1.0 - 0.01, 1.0 / chunk_count)
+    odds_ratio = 0.01 / target_chunk_fpr
     raw_threshold = odds_ratio / (1.0 + odds_ratio)
-    return min(raw_threshold, MAX_ADAPTIVE_THRESHOLD)
+    return min(raw_threshold, 0.9)
 
 
 def _parse_outcome_scores(data: dict[str, Any]) -> dict[str, float] | None:
@@ -66,8 +68,9 @@ def _prediction_for_score(score: float, threshold: float) -> Prediction:
     return "MALICIOUS" if score >= threshold else "BENIGN"
 
 
-def _block_result_from_json(data: dict[str, Any], threshold: float) -> BlockResult:
+def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
     score = float(data["score"])
+    threshold = float(data["threshold"])
     prediction = data.get("prediction") or _prediction_for_score(score, threshold)
     if prediction not in ("BENIGN", "MALICIOUS"):
         raise ValueError(f"Firewall: invalid prediction {prediction!r}")
@@ -78,6 +81,33 @@ def _block_result_from_json(data: dict[str, Any], threshold: float) -> BlockResu
         primary_outcome=data.get("primary_outcome"),
         outcome_scores=_parse_outcome_scores(data),
     )
+
+
+def _sdk_metadata(
+    metadata: ClassificationMetadata | None,
+    *,
+    request_id: str,
+    input_index: int,
+    chunk_index: int,
+    chunk_count: int,
+) -> dict[str, Any]:
+    payload = dict(metadata) if metadata is not None else {}
+    existing = payload.get("silmaril")
+    if existing is not None and not isinstance(existing, Mapping):
+        raise ValueError("Firewall: metadata.silmaril must be an object when provided")
+    namespace = dict(existing) if isinstance(existing, Mapping) else {}
+    namespace.update(
+        {
+            "sdk_language": "python",
+            "sdk_version": VERSION,
+            "request_id": request_id,
+            "input_index": input_index,
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+        }
+    )
+    payload["silmaril"] = namespace
+    return payload
 
 
 def _retry_after_seconds(value: str | None) -> float | None:
@@ -182,9 +212,17 @@ class Firewall:
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
         shadow_mode: bool | None = None,
+        request_id: str | None = None,
     ) -> BlockResult:
-        """Classify a single text and enforce the internal adaptive threshold."""
-        result = self._classify_raw(text, hook=hook, tool_name=tool_name, metadata=metadata)
+        """Classify a single text and enforce the backend tenant threshold."""
+        request_id_value = request_id or str(uuid4())
+        result = self._classify_raw(
+            text,
+            hook=hook,
+            tool_name=tool_name,
+            metadata=metadata,
+            request_id=request_id_value,
+        )
         event = self._new_classify_event(
             text=text,
             hook=hook,
@@ -194,7 +232,7 @@ class Firewall:
         )
         self._fire_on_classify(event)
         if event.blocked and not event.shadow_mode:
-            raise PromptBlockedException(
+            raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
                 prompt_text=text,
@@ -212,13 +250,16 @@ class Firewall:
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
         shadow_mode: bool | None = None,
+        request_id: str | None = None,
     ) -> list[BlockResult]:
-        """Classify multiple independent texts and enforce adaptive thresholds."""
+        """Classify multiple independent texts and enforce backend tenant thresholds."""
+        request_id_value = request_id or str(uuid4())
         results = self._classify_batch_raw(
             texts,
             hooks=hooks,
             tool_names=tool_names,
             metadata=metadata,
+            request_id=request_id_value,
         )
         effective_shadow = self._effective_shadow_mode(shadow_mode)
         blocked: list[BlockedBatchItem] = []
@@ -244,7 +285,7 @@ class Firewall:
                     )
                 )
         if blocked:
-            raise BatchPromptBlockedException(blocked=blocked, results=results)
+            raise BatchFirewallBlockedException(blocked=blocked, results=results)
         return results
 
     def as_langchain_handler(self, **options: Any) -> Any:
@@ -266,30 +307,40 @@ class Firewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
+        request_id: str,
     ) -> BlockResult:
         chunks = chunk_text(text)
-        threshold_value = adaptive_threshold(len(chunks))
         if len(chunks) == 1:
             return self._classify_single_raw(
                 chunks[0],
                 hook=hook,
                 tool_name=tool_name,
-                metadata=metadata,
-                threshold=threshold_value,
+                metadata=_sdk_metadata(
+                    metadata,
+                    request_id=request_id,
+                    input_index=0,
+                    chunk_index=0,
+                    chunk_count=1,
+                ),
             )
 
         workers = min(self.chunk_concurrency, len(chunks))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             results = list(
                 executor.map(
-                    lambda chunk: self._classify_single_raw(
-                        chunk,
+                    lambda item: self._classify_single_raw(
+                        item[1],
                         hook=hook,
                         tool_name=tool_name,
-                        metadata=metadata,
-                        threshold=threshold_value,
+                        metadata=_sdk_metadata(
+                            metadata,
+                            request_id=request_id,
+                            input_index=0,
+                            chunk_index=item[0],
+                            chunk_count=len(chunks),
+                        ),
                     ),
-                    chunks,
+                    enumerate(chunks),
                 )
             )
         return max(results, key=lambda result: result.score)
@@ -301,9 +352,8 @@ class Firewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
-        threshold: float,
     ) -> BlockResult:
-        payload: dict[str, Any] = {"text": text, "threshold": threshold}
+        payload: dict[str, Any] = {"text": text}
         hook_str = hook_value(hook)
         if hook_str:
             payload["hook"] = hook_str
@@ -312,7 +362,7 @@ class Firewall:
         if metadata is not None:
             payload["metadata"] = dict(metadata)
         data = self._post_json(payload)
-        return _block_result_from_json(data, threshold)
+        return _block_result_from_json(data)
 
     def _classify_batch_raw(
         self,
@@ -321,6 +371,7 @@ class Firewall:
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
+        request_id: str,
     ) -> list[BlockResult]:
         text_list = list(texts)
         if not text_list:
@@ -340,14 +391,21 @@ class Firewall:
                 f"{len(text_list)}"
             )
 
-        threshold_value = adaptive_threshold(len(text_list))
-        payload: dict[str, Any] = {"texts": text_list, "threshold": threshold_value}
+        payload: dict[str, Any] = {"texts": text_list}
         if hooks:
             payload["hooks"] = [hook_value(h) for h in hooks]
         if tool_names:
             payload["tool_names"] = list(tool_names)
-        if metadata is not None:
-            payload["metadata"] = [dict(item) if item is not None else None for item in metadata]
+        payload["metadata"] = [
+            _sdk_metadata(
+                metadata[index] if metadata is not None else None,
+                request_id=request_id,
+                input_index=index,
+                chunk_index=0,
+                chunk_count=1,
+            )
+            for index in range(len(text_list))
+        ]
 
         data = self._post_json(payload)
         predictions = data["predictions"]
@@ -356,7 +414,7 @@ class Firewall:
                 "Firewall: predictions length "
                 f"{len(predictions)} does not match texts length {len(text_list)}"
             )
-        return [_block_result_from_json(item, threshold_value) for item in predictions]
+        return [_block_result_from_json(item) for item in predictions]
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)
