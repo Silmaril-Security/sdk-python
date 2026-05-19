@@ -69,3 +69,6 @@ ignore = ["E501"]
 testpaths = ["tests"]
 python_files = "test_*.py"
 pythonpath = ["src"]
+markers = [
+    "integration: live tests that call a deployed Silmaril Firewall endpoint",
+]
