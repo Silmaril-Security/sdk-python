@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan release
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.plan.outputs.should_release }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Decide whether to release
+        id: plan
+        run: |
+          set -euo pipefail
+
+          version="$(python - <<'PY'
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          PY
+          )"
+          tag="v${version}"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9.-]+)?$ ]]; then
+            echo "::error::Invalid package version: $version"
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            tag_exists=true
+          else
+            tag_exists=false
+          fi
+
+          status="$(python - "$version" <<'PY'
+          import sys
+          import urllib.error
+          import urllib.request
+
+          version = sys.argv[1]
+          url = f"https://pypi.org/pypi/silmaril-security-sdk/{version}/json"
+          try:
+              with urllib.request.urlopen(url, timeout=20) as response:
+                  print(response.status)
+          except urllib.error.HTTPError as exc:
+              print(exc.code)
+          PY
+          )"
+
+          if [[ "$status" == "200" ]]; then
+            package_exists=true
+          elif [[ "$status" == "404" ]]; then
+            package_exists=false
+          else
+            echo "::error::Unexpected PyPI response while checking $version: HTTP $status"
+            exit 1
+          fi
+
+          if [[ "$tag_exists" == "true" && "$package_exists" == "true" ]]; then
+            should_release=false
+            echo "Version $version is already tagged and published; skipping."
+          elif [[ "$tag_exists" == "false" && "$package_exists" == "false" ]]; then
+            should_release=true
+            echo "Version $version has not been released; publishing."
+          elif [[ "$tag_exists" == "true" ]]; then
+            echo "::error::Tag $tag exists, but PyPI version $version is missing."
+            exit 1
+          else
+            echo "::error::PyPI version $version exists, but tag $tag is missing."
+            exit 1
+          fi
+
+          {
+            echo "should_release=${should_release}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+
+  tag:
+    name: Create tag
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push release tag
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/${TAG}"
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    needs: [plan, tag]
+    if: needs.plan.outputs.should_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,langchain]"
+
+      - name: Ruff
+        run: ruff check src tests
+
+      - name: Pytest
+        run: pytest -q
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package metadata
+        run: python -m twine check dist/*
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [plan, build]
+    if: needs.plan.outputs.should_release == 'true'
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+
+      - name: Publish package
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github_release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs: [plan, publish]
+    if: needs.plan.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping."
+          else
+            gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
+          fi
