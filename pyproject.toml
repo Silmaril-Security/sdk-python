@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "silmaril-security-sdk"
-version = "0.3.2"
+version = "0.4.0"
 description = "Python SDK for Silmaril Firewall prompt injection and jailbreak detection"
 authors = [
     { name = "Silmaril Security Inc", email = "engineering@silmarilsecurity.com" }
@@ -14,6 +14,7 @@ license = { text = "Proprietary" }
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.33.0",
+    "typing-extensions>=4.9.0",
 ]
 keywords = [
     "silmaril",

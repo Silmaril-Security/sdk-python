@@ -13,14 +13,16 @@ import requests
 from silmaril_security.sdk import (
     CHUNK_WINDOW_CHARS,
     DEFAULT_CHUNK_CONCURRENCY,
+    BatchFirewallBlockedException,
     BatchPromptBlockedException,
     BlockResult,
     Firewall,
+    FirewallBlockedException,
     HookLabel,
     PromptBlockedException,
     SilmarilApiError,
 )
-from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES, adaptive_threshold
+from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
 
 TEST_API_URL = "https://api.test.invalid/classify"
 
@@ -55,14 +57,9 @@ def test_constructor_requires_key_and_url():
         Firewall(api_key="sk", api_url="")
 
 
-def test_adaptive_threshold_schedule():
-    assert adaptive_threshold(1) == 0.5
-    assert adaptive_threshold(2) == pytest.approx(0.6661087830919008)
-    assert adaptive_threshold(5) == pytest.approx(0.8327747955407889)
-    assert adaptive_threshold(10) == 0.9
-    assert adaptive_threshold(100) == 0.9
-    with pytest.raises(ValueError, match="chunk_count"):
-        adaptive_threshold(0)
+def test_deprecated_exception_names_alias_new_names():
+    assert PromptBlockedException is FirewallBlockedException
+    assert BatchPromptBlockedException is BatchFirewallBlockedException
 
 
 def test_constructor_validates_chunk_concurrency():
@@ -81,11 +78,16 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append({"url": url, **kwargs})
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.12})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.12, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    result = fw.classify("hello", hook=HookLabel.USER_INPUT, tool_name="chat")
+    result = fw.classify(
+        "hello",
+        hook=HookLabel.USER_INPUT,
+        tool_name="chat",
+        request_id="req-test",
+    )
 
     assert result == BlockResult(prediction="BENIGN", score=0.12, threshold=0.5)
     assert fw._session.headers["x-api-key"] == "sk-test"
@@ -94,10 +96,21 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
     assert calls[0]["timeout"] == 10.0
     assert calls[0]["allow_redirects"] is False
     assert calls[0]["stream"] is True
-    assert calls[0]["data"] == (
-        '{"text": "hello", "threshold": 0.5, '
-        '"hook": "user_input", "tool_name": "chat"}'
-    )
+    assert json.loads(calls[0]["data"]) == {
+        "text": "hello",
+        "hook": "user_input",
+        "tool_name": "chat",
+        "metadata": {
+            "silmaril": {
+                "sdk_language": "python",
+                "sdk_version": "0.4.0",
+                "request_id": "req-test",
+                "input_index": 0,
+                "chunk_index": 0,
+                "chunk_count": 1,
+            }
+        },
+    }
 
 
 def test_classify_posts_metadata_when_provided(monkeypatch):
@@ -106,7 +119,7 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append({"url": url, **kwargs})
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.12})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.12, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -120,18 +133,26 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
                 "message_id": "msg-123",
             }
         },
+        request_id="req-meta",
     )
 
     assert json.loads(calls[0]["data"]) == {
         "text": "hello",
-        "threshold": 0.5,
         "hook": "user_input",
         "metadata": {
             "langgraph": {
                 "thread_id": "thread-123",
                 "run_id": "run-123",
                 "message_id": "msg-123",
-            }
+            },
+            "silmaril": {
+                "sdk_language": "python",
+                "sdk_version": "0.4.0",
+                "request_id": "req-meta",
+                "input_index": 0,
+                "chunk_index": 0,
+                "chunk_count": 1,
+            },
         },
     }
 
@@ -140,11 +161,11 @@ def test_classify_enforces_by_default(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91})
+        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    with pytest.raises(PromptBlockedException) as exc_info:
+    with pytest.raises(FirewallBlockedException) as exc_info:
         fw.classify("ignore previous", hook=HookLabel.USER_INPUT, tool_name="chat")
 
     assert exc_info.value.score == 0.91
@@ -164,7 +185,7 @@ def test_classify_shadow_mode_suppresses_block_and_emits_event(monkeypatch):
     )
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91})
+        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -181,11 +202,11 @@ def test_classify_per_call_shadow_mode_override(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91})
+        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    with pytest.raises(PromptBlockedException):
+    with pytest.raises(FirewallBlockedException):
         fw.classify("attack", shadow_mode=False)
 
 
@@ -199,9 +220,9 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
             200,
             {
                 "predictions": [
-                    {"prediction": "MALICIOUS", "score": 0.8},
-                    {"prediction": "BENIGN", "score": 0.1},
-                    {"prediction": "MALICIOUS", "score": 0.8},
+                    {"prediction": "MALICIOUS", "score": 0.8, "threshold": 0.5},
+                    {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
+                    {"prediction": "MALICIOUS", "score": 0.8, "threshold": 0.5},
                 ]
             },
         )
@@ -218,12 +239,14 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     assert len(exc_info.value.results) == 3
     assert [item.index for item in exc_info.value.blocked] == [0, 2]
     assert exc_info.value.blocked[0].tool_name == "chat"
-    threshold = adaptive_threshold(3)
-    assert calls[0]["data"] == (
-        f'{{"texts": ["first", "second", "third"], "threshold": {threshold}, '
-        '"hooks": ["user_input", "tool_response", "tool_response"], '
-        '"tool_names": ["chat", "read_file", null]}'
-    )
+    body = json.loads(calls[0]["data"])
+    assert body["texts"] == ["first", "second", "third"]
+    assert "threshold" not in body
+    assert body["hooks"] == ["user_input", "tool_response", "tool_response"]
+    assert body["tool_names"] == ["chat", "read_file", None]
+    assert [item["silmaril"]["input_index"] for item in body["metadata"]] == [0, 1, 2]
+    assert [item["silmaril"]["chunk_index"] for item in body["metadata"]] == [0, 0, 0]
+    assert [item["silmaril"]["chunk_count"] for item in body["metadata"]] == [1, 1, 1]
 
 
 def test_classify_batch_serializes_metadata(monkeypatch):
@@ -234,7 +257,12 @@ def test_classify_batch_serializes_metadata(monkeypatch):
         calls.append(kwargs)
         return FakeResponse(
             200,
-            {"predictions": [{"prediction": "BENIGN", "score": 0.1}] * 2},
+            {
+                "predictions": [
+                    {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
+                    {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
+                ]
+            },
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
@@ -245,12 +273,34 @@ def test_classify_batch_serializes_metadata(monkeypatch):
             {"langgraph": {"run_id": "run-a"}},
             None,
         ],
+        request_id="batch-req",
     )
 
     assert json.loads(calls[0]["data"]) == {
         "texts": ["first", "second"],
-        "threshold": adaptive_threshold(2),
-        "metadata": [{"langgraph": {"run_id": "run-a"}}, None],
+        "metadata": [
+            {
+                "langgraph": {"run_id": "run-a"},
+                "silmaril": {
+                    "sdk_language": "python",
+                    "sdk_version": "0.4.0",
+                    "request_id": "batch-req",
+                    "input_index": 0,
+                    "chunk_index": 0,
+                    "chunk_count": 1,
+                },
+            },
+            {
+                "silmaril": {
+                    "sdk_language": "python",
+                    "sdk_version": "0.4.0",
+                    "request_id": "batch-req",
+                    "input_index": 1,
+                    "chunk_index": 0,
+                    "chunk_count": 1,
+                }
+            },
+        ],
     }
 
 
@@ -260,7 +310,7 @@ def test_classify_batch_shadow_mode_returns_results(monkeypatch):
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         return FakeResponse(
             200,
-            {"predictions": [{"prediction": "MALICIOUS", "score": 0.8}]},
+            {"predictions": [{"prediction": "MALICIOUS", "score": 0.8, "threshold": 0.5}]},
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
@@ -294,22 +344,33 @@ def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
             calls.append({"url": url, **kwargs})
             score = scores[len(calls) - 1]
         prediction = "MALICIOUS" if score >= 0.5 else "BENIGN"
-        return FakeResponse(200, {"prediction": prediction, "score": score})
+        return FakeResponse(200, {"prediction": prediction, "score": score, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    result = fw.classify("a" * (CHUNK_WINDOW_CHARS * 3), hook=HookLabel.USER_INPUT)
+    result = fw.classify(
+        "a" * (CHUNK_WINDOW_CHARS * 3),
+        hook=HookLabel.USER_INPUT,
+        request_id="chunk-req",
+    )
 
     assert result.prediction == "MALICIOUS"
     assert result.score == 0.95
     assert len(calls) > 1
-    threshold = adaptive_threshold(len(calls))
-    for call in calls:
+    for index, call in enumerate(calls):
         body = json.loads(call["data"])
         assert "text" in body
         assert "texts" not in body
         assert body["hook"] == "user_input"
-        assert body["threshold"] == threshold
+        assert "threshold" not in body
+        assert body["metadata"]["silmaril"] == {
+            "sdk_language": "python",
+            "sdk_version": "0.4.0",
+            "request_id": "chunk-req",
+            "input_index": 0,
+            "chunk_index": index,
+            "chunk_count": len(calls),
+        }
 
 
 def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
@@ -320,7 +381,7 @@ def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         with lock:
             calls.append({"url": url, **kwargs})
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -329,6 +390,7 @@ def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
         hook=HookLabel.TOOL_RESPONSE,
         tool_name="fetch_webpage",
         metadata={"langgraph": {"run_id": "run-chunked"}},
+        request_id="chunk-meta",
     )
 
     assert len(calls) > 1
@@ -336,7 +398,9 @@ def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
         body = json.loads(call["data"])
         assert body["hook"] == "tool_response"
         assert body["tool_name"] == "fetch_webpage"
-        assert body["metadata"] == {"langgraph": {"run_id": "run-chunked"}}
+        assert body["metadata"]["langgraph"] == {"run_id": "run-chunked"}
+        assert body["metadata"]["silmaril"]["request_id"] == "chunk-meta"
+        assert body["metadata"]["silmaril"]["chunk_count"] == len(calls)
         assert "texts" not in body
 
 
@@ -356,7 +420,7 @@ def test_classify_chunk_concurrency_limit(monkeypatch):
         time.sleep(0.01)
         with lock:
             active -= 1
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -378,7 +442,7 @@ def test_classify_long_input_propagates_chunk_error(monkeypatch):
             current = calls
         if current == 1:
             return FakeResponse(400, "boom", reason="Bad Request")
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -398,6 +462,7 @@ def test_optional_outcome_fields(monkeypatch):
             {
                 "prediction": "MALICIOUS",
                 "score": 0.91,
+                "threshold": 0.5,
                 "primary_outcome": "secret_exposure",
                 "outcome_scores": {"secret_exposure": 0.8},
             },
@@ -416,7 +481,7 @@ def test_retries_retryable_status(monkeypatch):
     responses = [
         FakeResponse(429, "rate limited"),
         FakeResponse(503, "unavailable"),
-        FakeResponse(200, {"prediction": "BENIGN", "score": 0.01}),
+        FakeResponse(200, {"prediction": "BENIGN", "score": 0.01, "threshold": 0.5}),
     ]
     sleeps: list[float] = []
 
