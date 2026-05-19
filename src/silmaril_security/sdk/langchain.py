@@ -8,7 +8,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from silmaril_security.sdk._utils import (
     _TOOL_ROLES,
@@ -21,8 +21,8 @@ from silmaril_security.sdk._utils import (
     get_content,
     get_role,
 )
-from silmaril_security.sdk.exceptions import PromptBlockedException
-from silmaril_security.sdk.firewall import Firewall, adaptive_threshold
+from silmaril_security.sdk.exceptions import FirewallBlockedException
+from silmaril_security.sdk.firewall import Firewall
 from silmaril_security.sdk.hooks import (
     FIREWALL_HOOK_TO_LABEL,
     FirewallHook,
@@ -94,6 +94,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
+                request_id=str(run_id),
             )
         except Exception:
             if not self.fail_open:
@@ -115,7 +116,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         )
         self._fire_on_classify(event)
         if blocked and not self.shadow_mode:
-            raise PromptBlockedException(
+            raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
                 prompt_text=text,
@@ -295,6 +296,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
+                request_id=str(run_id),
             )
         except Exception:
             if not self._sync_handler.fail_open:
@@ -316,7 +318,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         )
         await self._fire_on_classify(event)
         if blocked and not self._sync_handler.shadow_mode:
-            raise PromptBlockedException(
+            raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
                 prompt_text=text,
@@ -441,16 +443,17 @@ async def _async_classify_raw(
     hook: HookLabel | str | None,
     tool_name: str | None,
     metadata: ClassificationMetadata | None = None,
+    request_id: str | None = None,
 ) -> BlockResult:
     import asyncio
 
     import httpx
 
-    from silmaril_security.sdk.firewall import _block_result_from_json
+    from silmaril_security.sdk.firewall import _block_result_from_json, _sdk_metadata
     from silmaril_security.sdk.hooks import hook_value
 
     chunks = __import__("silmaril_security.sdk.chunking", fromlist=["chunk_text"]).chunk_text(text)
-    threshold = adaptive_threshold(len(chunks))
+    request_id_value = request_id or str(uuid4())
     headers = {"x-api-key": firewall.api_key, "content-type": "application/json"}
     async with httpx.AsyncClient(
         headers=headers,
@@ -458,34 +461,44 @@ async def _async_classify_raw(
         follow_redirects=False,
     ) as client:
         if len(chunks) == 1:
-            payload: dict[str, Any] = {"text": chunks[0], "threshold": threshold}
+            payload: dict[str, Any] = {"text": chunks[0]}
             hook_str = hook_value(hook)
             if hook_str:
                 payload["hook"] = hook_str
             if tool_name:
                 payload["tool_name"] = tool_name
-            if metadata is not None:
-                payload["metadata"] = dict(metadata)
+            payload["metadata"] = _sdk_metadata(
+                metadata,
+                request_id=request_id_value,
+                input_index=0,
+                chunk_index=0,
+                chunk_count=1,
+            )
             data = await _async_post_json(client, firewall, payload)
-            return _block_result_from_json(data, threshold)
+            return _block_result_from_json(data)
 
         semaphore = asyncio.Semaphore(firewall.chunk_concurrency)
 
-        async def classify_chunk(chunk: str) -> BlockResult:
-            payload: dict[str, Any] = {"text": chunk, "threshold": threshold}
+        async def classify_chunk(index: int, chunk: str) -> BlockResult:
+            payload: dict[str, Any] = {"text": chunk}
             hook_str = hook_value(hook)
             if hook_str:
                 payload["hook"] = hook_str
             if tool_name:
                 payload["tool_name"] = tool_name
-            if metadata is not None:
-                payload["metadata"] = dict(metadata)
+            payload["metadata"] = _sdk_metadata(
+                metadata,
+                request_id=request_id_value,
+                input_index=0,
+                chunk_index=index,
+                chunk_count=len(chunks),
+            )
             async with semaphore:
                 data = await _async_post_json(client, firewall, payload)
-            return _block_result_from_json(data, threshold)
+            return _block_result_from_json(data)
 
         chunk_results = await asyncio.gather(
-            *(classify_chunk(chunk) for chunk in chunks),
+            *(classify_chunk(index, chunk) for index, chunk in enumerate(chunks)),
             return_exceptions=True,
         )
         for result in chunk_results:

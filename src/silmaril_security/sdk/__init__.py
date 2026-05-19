@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from silmaril_security.sdk._version import VERSION
 from silmaril_security.sdk.chunking import (
     CHARS_PER_TOKEN,
     CHUNK_OVERLAP,
@@ -16,7 +17,9 @@ from silmaril_security.sdk.chunking import (
 )
 from silmaril_security.sdk.exceptions import (
     APIError,
+    BatchFirewallBlockedException,
     BatchPromptBlockedException,
+    FirewallBlockedException,
     PromptBlockedException,
     SilmarilApiError,
 )
@@ -47,13 +50,14 @@ from silmaril_security.sdk.types import (
     Prediction,
 )
 
-__version__ = "0.3.2"
+__version__ = VERSION
 
 __all__ = [
     "ALL_HOOKS",
     "APIError",
     "BlockResult",
     "BlockedBatchItem",
+    "BatchFirewallBlockedException",
     "BatchPromptBlockedException",
     "CHARS_PER_TOKEN",
     "CHUNK_OVERLAP",
@@ -68,6 +72,7 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "FIREWALL_HOOK_TO_LABEL",
     "Firewall",
+    "FirewallBlockedException",
     "FirewallHook",
     "HookLabel",
     "INPUT_HOOKS",

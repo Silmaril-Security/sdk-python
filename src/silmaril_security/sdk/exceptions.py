@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+from typing_extensions import deprecated
 
 from silmaril_security.sdk.hooks import HookLabel
 from silmaril_security.sdk.types import BlockedBatchItem, BlockResult
@@ -25,8 +28,8 @@ class SilmarilApiError(Exception):
 APIError = SilmarilApiError
 
 
-class PromptBlockedException(Exception):
-    """Raised when a single classification meets or exceeds its threshold."""
+class FirewallBlockedException(Exception):
+    """Raised when a single classification is blocked by the Firewall."""
 
     def __init__(
         self,
@@ -53,14 +56,14 @@ class PromptBlockedException(Exception):
         if len(truncated) > _MAX_PROMPT_DISPLAY_LEN:
             truncated = truncated[:_MAX_PROMPT_DISPLAY_LEN] + "..."
         return (
-            "Prompt blocked by Silmaril Firewall "
+            "Request blocked by Silmaril Firewall "
             f"(score={self.score:.4f}, threshold={self.threshold:.4f}): "
             f"{truncated!r}"
         )
 
 
-class BatchPromptBlockedException(Exception):
-    """Raised when one or more batch items meet or exceed their threshold."""
+class BatchFirewallBlockedException(Exception):
+    """Raised when one or more batch items are blocked by the Firewall."""
 
     def __init__(
         self,
@@ -76,8 +79,23 @@ class BatchPromptBlockedException(Exception):
         if len(self.blocked) == 1:
             item = self.blocked[0]
             return (
-                "Batch prompt blocked by Silmaril Firewall "
+                "Batch request blocked by Silmaril Firewall "
                 f"at index {item.index} "
                 f"(score={item.result.score:.4f}, threshold={item.result.threshold:.4f})"
             )
-        return f"Batch prompts blocked by Silmaril Firewall ({len(self.blocked)} items)"
+        return f"Batch requests blocked by Silmaril Firewall ({len(self.blocked)} items)"
+
+
+if TYPE_CHECKING:
+
+    @deprecated("Use FirewallBlockedException instead.")
+    class PromptBlockedException(FirewallBlockedException):
+        pass
+
+    @deprecated("Use BatchFirewallBlockedException instead.")
+    class BatchPromptBlockedException(BatchFirewallBlockedException):
+        pass
+
+else:
+    PromptBlockedException = FirewallBlockedException
+    BatchPromptBlockedException = BatchFirewallBlockedException
