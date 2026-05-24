@@ -12,6 +12,10 @@ Language SDK repositories follow the `sdk-<language>` naming pattern. The
 Python SDK is published to PyPI as `silmaril-security-sdk` and is imported from
 `silmaril_security.sdk`.
 
+This repository is public and source-available for Silmaril customers and
+integrators. It is not permissive open source; use, redistribution, and
+competitive-use restrictions are defined in [LICENSE](LICENSE).
+
 This SDK provides the low-level Python interface for that workflow:
 
 - Create a tenant-specific firewall client.
@@ -36,7 +40,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.4.0
+pip install silmaril-security-sdk==0.4.1
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -318,7 +322,12 @@ batch override.
 
 ## Migration Notes
 
-Version `0.4.0` moves all threshold decisions to Firewall tenant/backend
+Version `0.4.1` contains the public `0.4.x` SDK changes and supersedes the
+unpublished `0.4.0` package. The `v0.4.0` Git tag exists, but PyPI publishing
+failed before the package was created, so `0.4.1` is the next installable
+release line.
+
+The `0.4.x` line moves all threshold decisions to Firewall tenant/backend
 config, adds SDK reconstruction metadata, and renames blocking exceptions to
 `FirewallBlockedException` and `BatchFirewallBlockedException`. Deprecated
 `PromptBlockedException` aliases remain available for one release.
@@ -365,19 +374,21 @@ Run the full local check before opening a PR:
 
 ```sh
 pip install -e ".[dev,langchain]"
-pytest -q
-ruff check src tests
+python -m pytest -q -m "not integration"
+python -m ruff check src tests
+rm -rf dist build src/*.egg-info
 python -m build
 python -m twine check dist/*
 ```
 
 ## Publishing
 
-```sh
-python -m build
-python -m twine check dist/*
-python -m twine upload dist/*
-```
+Publishing is handled by `.github/workflows/release.yml` when a version bump
+lands on `main`. Before merging a release PR, maintainers must confirm the PyPI
+trusted publisher for `silmaril-security-sdk` is configured for repository
+`Silmaril-Security/sdk-python`, workflow `.github/workflows/release.yml`, and
+environment `pypi`. The workflow builds and publishes before creating the Git
+tag so a PyPI authentication failure does not leave another stale release tag.
 
 ## License
 

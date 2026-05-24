@@ -4,17 +4,28 @@ build-backend = "hatchling.build"
 
 [project]
 name = "silmaril-security-sdk"
-version = "0.4.0"
+version = "0.4.1"
 description = "Python SDK for Silmaril Firewall prompt injection and jailbreak detection"
 authors = [
-    { name = "Silmaril Security Inc", email = "engineering@silmarilsecurity.com" }
+    { name = "Silmaril Security Inc" }
 ]
 readme = "README.md"
-license = { text = "Proprietary" }
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.33.0",
+    "requests>=2.31.0",
     "typing-extensions>=4.9.0",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
 ]
 keywords = [
     "silmaril",
@@ -46,12 +57,26 @@ dev = [
 Homepage = "https://silmarilsecurity.com"
 Repository = "https://github.com/Silmaril-Security/sdk-python"
 Issues = "https://github.com/Silmaril-Security/sdk-python/issues"
+Changelog = "https://github.com/Silmaril-Security/sdk-python/blob/main/CHANGELOG.md"
+Security = "https://github.com/Silmaril-Security/sdk-python/blob/main/SECURITY.md"
 
 [tool.hatch.build]
 include = [
     "src/silmaril_security/sdk",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+]
+exclude = [
+    "/.env",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/build",
+    "/dist",
+    "**/__pycache__",
+    "*.py[cod]",
 ]
 
 [tool.hatch.build.targets.wheel]

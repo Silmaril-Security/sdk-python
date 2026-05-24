@@ -128,14 +128,14 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
     async def fake_post_json(client, firewall, payload):
         nonlocal active, max_active
         payloads.append(payload)
-        call_index = len(payloads)
+        chunk_index = payload["metadata"]["silmaril"]["chunk_index"]
         active += 1
         max_active = max(max_active, active)
         try:
             import asyncio
 
             await asyncio.sleep(0)
-            score = 0.95 if call_index == 2 else 0.1
+            score = 0.95 if chunk_index == 1 else 0.1
             return {
                 "prediction": "MALICIOUS" if score >= 0.5 else "BENIGN",
                 "score": score,
@@ -158,7 +158,11 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
     assert result.score == 0.95
     assert len(payloads) > 1
     assert max_active <= 2
-    for index, payload in enumerate(payloads):
+    assert sorted(payload["metadata"]["silmaril"]["chunk_index"] for payload in payloads) == list(
+        range(len(payloads))
+    )
+    for payload in payloads:
+        index = payload["metadata"]["silmaril"]["chunk_index"]
         assert "text" in payload
         assert "texts" not in payload
         assert payload["hook"] == "user_input"
@@ -166,7 +170,7 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
         assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
         assert payload["metadata"]["silmaril"] == {
             "sdk_language": "python",
-            "sdk_version": "0.4.0",
+            "sdk_version": "0.4.1",
             "request_id": "async-req",
             "input_index": 0,
             "chunk_index": index,

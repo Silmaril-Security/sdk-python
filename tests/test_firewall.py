@@ -103,7 +103,7 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         "metadata": {
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.4.0",
+                "sdk_version": "0.4.1",
                 "request_id": "req-test",
                 "input_index": 0,
                 "chunk_index": 0,
@@ -147,7 +147,7 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
             },
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.4.0",
+                "sdk_version": "0.4.1",
                 "request_id": "req-meta",
                 "input_index": 0,
                 "chunk_index": 0,
@@ -283,7 +283,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
                 "langgraph": {"run_id": "run-a"},
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.4.0",
+                    "sdk_version": "0.4.1",
                     "request_id": "batch-req",
                     "input_index": 0,
                     "chunk_index": 0,
@@ -293,7 +293,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
             {
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.4.0",
+                    "sdk_version": "0.4.1",
                     "request_id": "batch-req",
                     "input_index": 1,
                     "chunk_index": 0,
@@ -336,13 +336,15 @@ def test_classify_batch_rejects_bad_lengths():
 def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
     calls: list[dict[str, Any]] = []
-    scores = [0.2, 0.95, 0.4, 0.1]
+    scores_by_chunk = {0: 0.2, 1: 0.95, 2: 0.4, 3: 0.1}
     lock = threading.Lock()
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        body = json.loads(kwargs["data"])
+        chunk_index = body["metadata"]["silmaril"]["chunk_index"]
         with lock:
             calls.append({"url": url, **kwargs})
-            score = scores[len(calls) - 1]
+        score = scores_by_chunk[chunk_index]
         prediction = "MALICIOUS" if score >= 0.5 else "BENIGN"
         return FakeResponse(200, {"prediction": prediction, "score": score, "threshold": 0.5})
 
@@ -357,15 +359,19 @@ def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
     assert result.prediction == "MALICIOUS"
     assert result.score == 0.95
     assert len(calls) > 1
-    for index, call in enumerate(calls):
-        body = json.loads(call["data"])
+    bodies = [json.loads(call["data"]) for call in calls]
+    assert sorted(body["metadata"]["silmaril"]["chunk_index"] for body in bodies) == list(
+        range(len(calls))
+    )
+    for body in bodies:
+        index = body["metadata"]["silmaril"]["chunk_index"]
         assert "text" in body
         assert "texts" not in body
         assert body["hook"] == "user_input"
         assert "threshold" not in body
         assert body["metadata"]["silmaril"] == {
             "sdk_language": "python",
-            "sdk_version": "0.4.0",
+            "sdk_version": "0.4.1",
             "request_id": "chunk-req",
             "input_index": 0,
             "chunk_index": index,

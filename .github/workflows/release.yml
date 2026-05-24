@@ -89,7 +89,10 @@ jobs:
             echo "::error::Tag $tag exists, but PyPI version $version is missing."
             exit 1
           else
-            echo "::error::PyPI version $version exists, but tag $tag is missing."
+            # Recovery path: PyPI publish succeeded but tag creation/push did not.
+            # Manually create and push the missing tag at the commit that
+            # published this version, or bump the version before rerunning.
+            echo "::error::PyPI version $version exists, but tag $tag is missing. Manually create and push $tag at the published commit, or bump the package version before rerunning."
             exit 1
           fi
 
@@ -99,33 +102,10 @@ jobs:
             echo "tag=${tag}"
           } >> "$GITHUB_OUTPUT"
 
-  tag:
-    name: Create tag
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.should_release == 'true'
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Push release tag
-        env:
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG" "$GITHUB_SHA"
-          git push origin "refs/tags/${TAG}"
-
   build:
     name: Build distribution
     runs-on: ubuntu-latest
-    needs: [plan, tag]
+    needs: plan
     if: needs.plan.outputs.should_release == 'true'
     steps:
       - name: Checkout
@@ -146,7 +126,7 @@ jobs:
         run: ruff check src tests
 
       - name: Pytest
-        run: pytest -q
+        run: python -m pytest -q -m "not integration"
 
       - name: Build package
         run: python -m build
@@ -180,10 +160,33 @@ jobs:
       - name: Publish package
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  tag:
+    name: Create tag
+    runs-on: ubuntu-latest
+    needs: [plan, publish]
+    if: needs.plan.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push release tag
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/${TAG}"
+
   github_release:
     name: Create GitHub release
     runs-on: ubuntu-latest
-    needs: [plan, publish]
+    needs: [plan, tag]
     if: needs.plan.outputs.should_release == 'true'
     permissions:
       contents: write
