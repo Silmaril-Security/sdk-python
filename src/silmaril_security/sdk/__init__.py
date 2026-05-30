@@ -13,6 +13,7 @@ from silmaril_security.sdk.chunking import (
     CHUNK_WINDOW_CHARS,
     MAX_INPUT_CHARS,
     MAX_INPUT_TOKENS,
+    SERVER_SINGLE_TEXT_MAX_CHARS,
     chunk_text,
 )
 from silmaril_security.sdk.exceptions import (
@@ -80,6 +81,7 @@ __all__ = [
     "MAX_INPUT_TOKENS",
     "OUTPUT_HOOKS",
     "Prediction",
+    "SERVER_SINGLE_TEXT_MAX_CHARS",
     "PromptBlockedException",
     "SilmarilApiError",
     "SilmarilFirewall",

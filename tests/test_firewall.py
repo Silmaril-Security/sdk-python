@@ -13,6 +13,7 @@ import requests
 from silmaril_security.sdk import (
     CHUNK_WINDOW_CHARS,
     DEFAULT_CHUNK_CONCURRENCY,
+    SERVER_SINGLE_TEXT_MAX_CHARS,
     BatchFirewallBlockedException,
     BatchPromptBlockedException,
     BlockResult,
@@ -111,6 +112,32 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
             }
         },
     }
+
+
+def test_classify_accepts_null_score_when_backend_prediction_is_present(monkeypatch):
+    fw = Firewall(api_key="sk-test", api_url=TEST_API_URL, shadow_mode=True)
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        return FakeResponse(
+            200,
+            {
+                "prediction": "BENIGN",
+                "score": None,
+                "threshold": 0.9,
+                "primary_outcome": "benign",
+                "outcome_scores": {"secret_exposure": None},
+            },
+        )
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    result = fw.classify("hello")
+
+    assert result.prediction == "BENIGN"
+    assert result.score == 0.0
+    assert result.threshold == 0.9
+    assert result.primary_outcome == "benign"
+    assert result.outcome_scores == {}
 
 
 def test_classify_posts_metadata_when_provided(monkeypatch):
@@ -336,7 +363,6 @@ def test_classify_batch_rejects_bad_lengths():
 def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
     calls: list[dict[str, Any]] = []
-    scores_by_chunk = {0: 0.2, 1: 0.95, 2: 0.4, 3: 0.1}
     lock = threading.Lock()
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
@@ -344,14 +370,14 @@ def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
         chunk_index = body["metadata"]["silmaril"]["chunk_index"]
         with lock:
             calls.append({"url": url, **kwargs})
-        score = scores_by_chunk[chunk_index]
+        score = 0.95 if chunk_index == 1 else 0.1
         prediction = "MALICIOUS" if score >= 0.5 else "BENIGN"
         return FakeResponse(200, {"prediction": prediction, "score": score, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
     result = fw.classify(
-        "a" * (CHUNK_WINDOW_CHARS * 3),
+        "a" * (SERVER_SINGLE_TEXT_MAX_CHARS + CHUNK_WINDOW_CHARS),
         hook=HookLabel.USER_INPUT,
         request_id="chunk-req",
     )
@@ -379,6 +405,35 @@ def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
         }
 
 
+def test_classify_sends_normal_size_long_input_as_single_request(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append({"url": url, **kwargs})
+        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    fw.classify(
+        "a" * (CHUNK_WINDOW_CHARS * 3),
+        hook=HookLabel.TOOL_RESPONSE,
+        request_id="server-window-req",
+    )
+
+    assert len(calls) == 1
+    body = json.loads(calls[0]["data"])
+    assert body["text"] == "a" * (CHUNK_WINDOW_CHARS * 3)
+    assert body["metadata"]["silmaril"] == {
+        "sdk_language": "python",
+        "sdk_version": "0.4.1",
+        "request_id": "server-window-req",
+        "input_index": 0,
+        "chunk_index": 0,
+        "chunk_count": 1,
+    }
+
+
 def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
     calls: list[dict[str, Any]] = []
@@ -392,7 +447,7 @@ def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
     monkeypatch.setattr(fw._session, "post", fake_post)
 
     fw.classify(
-        "b" * (CHUNK_WINDOW_CHARS * 2),
+        "b" * (SERVER_SINGLE_TEXT_MAX_CHARS + CHUNK_WINDOW_CHARS),
         hook=HookLabel.TOOL_RESPONSE,
         tool_name="fetch_webpage",
         metadata={"langgraph": {"run_id": "run-chunked"}},
@@ -430,7 +485,7 @@ def test_classify_chunk_concurrency_limit(monkeypatch):
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    fw.classify("c" * (CHUNK_WINDOW_CHARS * 5))
+    fw.classify("c" * (SERVER_SINGLE_TEXT_MAX_CHARS + CHUNK_WINDOW_CHARS * 5))
 
     assert calls > 2
     assert max_active <= 2
@@ -453,7 +508,7 @@ def test_classify_long_input_propagates_chunk_error(monkeypatch):
     monkeypatch.setattr(fw._session, "post", fake_post)
 
     with pytest.raises(SilmarilApiError) as exc_info:
-        fw.classify("d" * (CHUNK_WINDOW_CHARS * 2))
+        fw.classify("d" * (SERVER_SINGLE_TEXT_MAX_CHARS + CHUNK_WINDOW_CHARS))
 
     assert exc_info.value.status == 400
     assert calls > 1

@@ -17,7 +17,7 @@ import requests
 from typing_extensions import deprecated
 
 from silmaril_security.sdk._version import VERSION
-from silmaril_security.sdk.chunking import chunk_text
+from silmaril_security.sdk.chunking import SERVER_SINGLE_TEXT_MAX_CHARS, chunk_text
 from silmaril_security.sdk.exceptions import (
     BatchFirewallBlockedException,
     FirewallBlockedException,
@@ -61,19 +61,36 @@ def _parse_outcome_scores(data: dict[str, Any]) -> dict[str, float] | None:
     raw = data.get("outcome_scores")
     if raw is None:
         return None
-    return {str(k): float(v) for k, v in raw.items()}
+    return {str(k): float(v) for k, v in raw.items() if v is not None}
 
 
 def _prediction_for_score(score: float, threshold: float) -> Prediction:
     return "MALICIOUS" if score >= threshold else "BENIGN"
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _score_from_json(data: dict[str, Any], *, prediction: Prediction, threshold: float) -> float:
+    score = _optional_float(data.get("score"))
+    if score is not None:
+        return score
+    return threshold if prediction == "MALICIOUS" else 0.0
+
+
 def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
-    score = float(data["score"])
-    threshold = float(data["threshold"])
-    prediction = data.get("prediction") or _prediction_for_score(score, threshold)
+    threshold = _optional_float(data.get("threshold")) or 0.5
+    raw_prediction = data.get("prediction")
+    score = _optional_float(data.get("score"))
+    prediction = raw_prediction or (
+        _prediction_for_score(score, threshold) if score is not None else None
+    )
     if prediction not in ("BENIGN", "MALICIOUS"):
         raise ValueError(f"Firewall: invalid prediction {prediction!r}")
+    score = _score_from_json(data, prediction=prediction, threshold=threshold)
     return BlockResult(
         prediction=prediction,
         score=score,
@@ -309,7 +326,7 @@ class Firewall:
         metadata: ClassificationMetadata | None = None,
         request_id: str,
     ) -> BlockResult:
-        chunks = chunk_text(text)
+        chunks = [text] if len(text) <= SERVER_SINGLE_TEXT_MAX_CHARS else chunk_text(text)
         if len(chunks) == 1:
             return self._classify_single_raw(
                 chunks[0],

@@ -452,7 +452,11 @@ async def _async_classify_raw(
     from silmaril_security.sdk.firewall import _block_result_from_json, _sdk_metadata
     from silmaril_security.sdk.hooks import hook_value
 
-    chunks = __import__("silmaril_security.sdk.chunking", fromlist=["chunk_text"]).chunk_text(text)
+    chunking = __import__(
+        "silmaril_security.sdk.chunking",
+        fromlist=["SERVER_SINGLE_TEXT_MAX_CHARS", "chunk_text"],
+    )
+    chunks = [text] if len(text) <= chunking.SERVER_SINGLE_TEXT_MAX_CHARS else chunking.chunk_text(text)
     request_id_value = request_id or str(uuid4())
     headers = {"x-api-key": firewall.api_key, "content-type": "application/json"}
     async with httpx.AsyncClient(

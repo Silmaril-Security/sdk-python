@@ -9,6 +9,7 @@ import pytest
 
 from silmaril_security.sdk import (
     CHUNK_WINDOW_CHARS,
+    SERVER_SINGLE_TEXT_MAX_CHARS,
     BlockResult,
     ClassifyEvent,
     Firewall,
@@ -148,7 +149,7 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
 
     result = await _async_classify_raw(
         fw,
-        "a" * (CHUNK_WINDOW_CHARS * 3),
+        "a" * (SERVER_SINGLE_TEXT_MAX_CHARS + CHUNK_WINDOW_CHARS),
         hook=HookLabel.USER_INPUT,
         tool_name="chat",
         metadata={"langgraph": {"run_id": "async-run"}},
