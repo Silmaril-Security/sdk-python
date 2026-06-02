@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from silmaril_security.sdk.hooks import HookLabel
+from silmaril_security.sdk.outcomes import HarmfulOutcome, PrimaryOutcome
 
 Prediction = Literal["BENIGN", "MALICIOUS"]
 ClassificationMetadata = Mapping[str, Any]
@@ -21,8 +22,10 @@ class BlockResult:
     prediction: Prediction
     score: float
     threshold: float
-    primary_outcome: str | None = None
-    outcome_scores: dict[str, float] | None = None
+    primary_outcome: PrimaryOutcome | None = None
+    outcome_scores: dict[HarmfulOutcome, float] | None = None
+    detector_scores: dict[HarmfulOutcome, float] | None = None
+    detector_counts: dict[HarmfulOutcome, int] | None = None
 
 
 @dataclass(frozen=True)

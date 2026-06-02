@@ -144,6 +144,48 @@ verdict at the applied threshold.
 When a custom `requests.Session` is provided, the SDK preserves it and adds the
 required `x-api-key` and `content-type` headers.
 
+## Handle Outcomes
+
+Use shadow mode when you want direct `classify()` calls to return the result for
+application routing instead of raising on blocked input:
+
+```python
+from silmaril_security.sdk import (
+    HookLabel,
+    OUTCOME_CONTROL_ABUSE,
+    OUTCOME_INFORMATION_DISCLOSURE,
+    OUTCOME_SECRET_EXPOSURE,
+    OUTCOME_SERVICE_DISRUPTION,
+    OUTCOME_SYSTEM_COMPROMISE,
+)
+
+result = fw.classify(user_input, hook=HookLabel.USER_INPUT, shadow_mode=True)
+
+if result.score < result.threshold:
+    continue_normally()
+elif result.primary_outcome == OUTCOME_SECRET_EXPOSURE:
+    redact_and_suppress(result)
+elif result.primary_outcome == OUTCOME_INFORMATION_DISCLOSURE:
+    require_review(result)
+elif result.primary_outcome == OUTCOME_CONTROL_ABUSE:
+    deny_and_ask_for_confirmation(result)
+elif result.primary_outcome == OUTCOME_SYSTEM_COMPROMISE:
+    block_and_escalate(result)
+elif result.primary_outcome == OUTCOME_SERVICE_DISRUPTION:
+    block_disruptive_action(result)
+else:
+    block_by_default(result)
+```
+
+Outcome taxonomy:
+
+- `benign`: no harmful firewall outcome detected.
+- `information_disclosure`: private data, documents, internal context, logs, traces, customer data, SQL rows, topology, or similar non-secret sensitive information.
+- `secret_exposure`: credentials, tokens, API keys, cookies, passwords, signing keys, OAuth secrets, session material, or webhook secrets.
+- `control_abuse`: misuse of authorized tools or user privileges to send, change, approve, delete, operate, or bypass policy/RBAC without a stronger outcome.
+- `system_compromise`: privilege escalation, account takeover, hostile integration/plugin takeover, persistence, lateral movement, attacker webhook registration, or code/plugin execution.
+- `service_disruption`: downtime, lockout, degradation, alert suppression, destructive loops, resource exhaustion, cost spikes, or hidden outage evidence.
+
 ## Backend Thresholding
 
 Customers do not tune score thresholds in the SDK. Tenant Firewall config owns

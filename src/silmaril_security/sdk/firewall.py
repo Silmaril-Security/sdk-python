@@ -24,6 +24,11 @@ from silmaril_security.sdk.exceptions import (
     SilmarilApiError,
 )
 from silmaril_security.sdk.hooks import HookLabel, hook_value, normalize_hook_label
+from silmaril_security.sdk.outcomes import (
+    normalize_harmful_outcome_float_map,
+    normalize_harmful_outcome_int_map,
+    normalize_primary_outcome,
+)
 from silmaril_security.sdk.types import (
     BlockedBatchItem,
     BlockResult,
@@ -57,13 +62,6 @@ def adaptive_threshold(chunk_count: int) -> float:
     return min(raw_threshold, 0.9)
 
 
-def _parse_outcome_scores(data: dict[str, Any]) -> dict[str, float] | None:
-    raw = data.get("outcome_scores")
-    if raw is None:
-        return None
-    return {str(k): float(v) for k, v in raw.items()}
-
-
 def _prediction_for_score(score: float, threshold: float) -> Prediction:
     return "MALICIOUS" if score >= threshold else "BENIGN"
 
@@ -74,12 +72,23 @@ def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
     prediction = data.get("prediction") or _prediction_for_score(score, threshold)
     if prediction not in ("BENIGN", "MALICIOUS"):
         raise ValueError(f"Firewall: invalid prediction {prediction!r}")
+    primary_raw = data.get("primary_outcome")
     return BlockResult(
         prediction=prediction,
         score=score,
         threshold=threshold,
-        primary_outcome=data.get("primary_outcome"),
-        outcome_scores=_parse_outcome_scores(data),
+        primary_outcome=(
+            normalize_primary_outcome(primary_raw) if primary_raw is not None else None
+        ),
+        outcome_scores=normalize_harmful_outcome_float_map(
+            data.get("outcome_scores"), "outcome_scores"
+        ),
+        detector_scores=normalize_harmful_outcome_float_map(
+            data.get("detector_scores"), "detector_scores"
+        ),
+        detector_counts=normalize_harmful_outcome_int_map(
+            data.get("detector_counts"), "detector_counts"
+        ),
     )
 
 
