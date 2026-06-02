@@ -2,6 +2,15 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.4.2 - 2026-06-02
+
+- Add typed firewall outcome constants, ordered outcome tuples, descriptions,
+  validation helpers, and response normalizers.
+- Type `BlockResult.primary_outcome`, `outcome_scores`, `detector_scores`,
+  and `detector_counts` around the canonical outcome taxonomy.
+- Document simple outcome routing examples for shadow-mode `classify()`
+  results.
+
 ## 0.4.1 - 2026-05-24
 
 - Recover the `0.4.x` release line after the `v0.4.0` Git tag was created but

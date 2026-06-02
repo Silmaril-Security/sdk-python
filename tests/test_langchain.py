@@ -170,7 +170,7 @@ async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
         assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
         assert payload["metadata"]["silmaril"] == {
             "sdk_language": "python",
-            "sdk_version": "0.4.1",
+            "sdk_version": "0.4.2",
             "request_id": "async-req",
             "input_index": 0,
             "chunk_index": index,
