@@ -114,10 +114,16 @@ def normalize_harmful_outcome_float_map(
         return None
     if not isinstance(value, Mapping):
         raise ValueError(f"Firewall: invalid {field_name} {value!r}")
-    return {
-        normalize_harmful_outcome(key, f"{field_name} key"): float(raw)
-        for key, raw in value.items()
-    }
+    result: dict[HarmfulOutcome, float] = {}
+    for key, raw in value.items():
+        outcome_key = normalize_harmful_outcome(key, f"{field_name} key")
+        try:
+            result[outcome_key] = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Firewall: invalid {field_name} value for {key!r}: {raw!r}"
+            ) from exc
+    return result
 
 
 def normalize_harmful_outcome_int_map(
@@ -130,7 +136,12 @@ def normalize_harmful_outcome_int_map(
         return None
     if not isinstance(value, Mapping):
         raise ValueError(f"Firewall: invalid {field_name} {value!r}")
-    return {
-        normalize_harmful_outcome(key, f"{field_name} key"): int(raw)
-        for key, raw in value.items()
-    }
+    result: dict[HarmfulOutcome, int] = {}
+    for key, raw in value.items():
+        outcome_key = normalize_harmful_outcome(key, f"{field_name} key")
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            raise ValueError(
+                f"Firewall: invalid {field_name} value for {key!r}: {raw!r} (expected int)"
+            )
+        result[outcome_key] = raw
+    return result
