@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Literal, cast
 
@@ -117,12 +118,16 @@ def normalize_harmful_outcome_float_map(
     result: dict[HarmfulOutcome, float] = {}
     for key, raw in value.items():
         outcome_key = normalize_harmful_outcome(key, f"{field_name} key")
-        try:
-            result[outcome_key] = float(raw)
-        except (TypeError, ValueError) as exc:
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
             raise ValueError(
-                f"Firewall: invalid {field_name} value for {key!r}: {raw!r}"
-            ) from exc
+                f"Firewall: invalid {field_name} value for {key!r}: {raw!r} (expected number)"
+            )
+        score = float(raw)
+        if not math.isfinite(score):
+            raise ValueError(
+                f"Firewall: invalid {field_name} value for {key!r}: {raw!r} (non-finite)"
+            )
+        result[outcome_key] = score
     return result
 
 

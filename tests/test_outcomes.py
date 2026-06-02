@@ -39,7 +39,7 @@ def test_outcome_validation_helpers():
     assert normalize_primary_outcome(OUTCOME_BENIGN) == OUTCOME_BENIGN
     assert normalize_harmful_outcome(OUTCOME_SECRET_EXPOSURE) == OUTCOME_SECRET_EXPOSURE
     assert normalize_harmful_outcome_float_map(
-        {OUTCOME_SECRET_EXPOSURE: "0.8"}, "outcome_scores"
+        {OUTCOME_SECRET_EXPOSURE: 0.8}, "outcome_scores"
     ) == {OUTCOME_SECRET_EXPOSURE: 0.8}
     assert normalize_harmful_outcome_int_map(
         {OUTCOME_SECRET_EXPOSURE: 2}, "detector_counts"
@@ -52,5 +52,15 @@ def test_outcome_validation_helpers():
         normalize_harmful_outcome_int_map({"unknown": 1}, "detector_counts")
     with pytest.raises(ValueError, match="invalid outcome_scores value"):
         normalize_harmful_outcome_float_map({OUTCOME_SECRET_EXPOSURE: "N/A"}, "outcome_scores")
+    with pytest.raises(ValueError, match="expected number"):
+        normalize_harmful_outcome_float_map({OUTCOME_SECRET_EXPOSURE: True}, "outcome_scores")
+    with pytest.raises(ValueError, match="non-finite"):
+        normalize_harmful_outcome_float_map(
+            {OUTCOME_SECRET_EXPOSURE: float("nan")}, "outcome_scores"
+        )
+    with pytest.raises(ValueError, match="non-finite"):
+        normalize_harmful_outcome_float_map(
+            {OUTCOME_SECRET_EXPOSURE: float("inf")}, "outcome_scores"
+        )
     with pytest.raises(ValueError, match="invalid detector_counts value"):
         normalize_harmful_outcome_int_map({OUTCOME_SECRET_EXPOSURE: 2.9}, "detector_counts")
