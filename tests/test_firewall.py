@@ -13,6 +13,7 @@ import requests
 from silmaril_security.sdk import (
     CHUNK_WINDOW_CHARS,
     DEFAULT_CHUNK_CONCURRENCY,
+    OUTCOME_SECRET_EXPOSURE,
     BatchFirewallBlockedException,
     BatchPromptBlockedException,
     BlockResult,
@@ -469,8 +470,10 @@ def test_optional_outcome_fields(monkeypatch):
                 "prediction": "MALICIOUS",
                 "score": 0.91,
                 "threshold": 0.5,
-                "primary_outcome": "secret_exposure",
-                "outcome_scores": {"secret_exposure": 0.8},
+                "primary_outcome": OUTCOME_SECRET_EXPOSURE,
+                "outcome_scores": {OUTCOME_SECRET_EXPOSURE: 0.8},
+                "detector_scores": {OUTCOME_SECRET_EXPOSURE: 1.0},
+                "detector_counts": {OUTCOME_SECRET_EXPOSURE: 2},
             },
         )
 
@@ -478,8 +481,52 @@ def test_optional_outcome_fields(monkeypatch):
 
     result = fw.classify("leak token")
 
-    assert result.primary_outcome == "secret_exposure"
-    assert result.outcome_scores == {"secret_exposure": 0.8}
+    assert result.primary_outcome == OUTCOME_SECRET_EXPOSURE
+    assert result.outcome_scores == {OUTCOME_SECRET_EXPOSURE: 0.8}
+    assert result.detector_scores == {OUTCOME_SECRET_EXPOSURE: 1.0}
+    assert result.detector_counts == {OUTCOME_SECRET_EXPOSURE: 2}
+
+
+def test_rejects_unknown_outcome_fields(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+
+    responses = iter(
+        [
+            {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5, "primary_outcome": "unknown"},
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "outcome_scores": {"unknown": 0.8},
+            },
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "detector_scores": {"unknown": 0.8},
+            },
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "detector_counts": {"unknown": 1},
+            },
+        ]
+    )
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        return FakeResponse(200, next(responses))
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    with pytest.raises(ValueError, match="invalid primary_outcome"):
+        fw.classify("x")
+    with pytest.raises(ValueError, match="invalid outcome_scores key"):
+        fw.classify("x")
+    with pytest.raises(ValueError, match="invalid detector_scores key"):
+        fw.classify("x")
+    with pytest.raises(ValueError, match="invalid detector_counts key"):
+        fw.classify("x")
 
 
 def test_retries_retryable_status(monkeypatch):
