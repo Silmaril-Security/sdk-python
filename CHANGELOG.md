@@ -2,6 +2,14 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.5.0 - 2026-07-15
+
+- Send every `classify()` input as one complete event without client chunking.
+- Preserve exact `metadata.conversationId` and emit one
+  `metadata.silmaril.request_id` per event.
+- Require backend `prediction` for enforcement while preserving optional
+  outcome scores.
+
 ## 0.4.2 - 2026-06-02
 
 - Add typed firewall outcome constants, ordered outcome tuples, descriptions,

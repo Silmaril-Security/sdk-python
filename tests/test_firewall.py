@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import json
-import threading
-import time
 from typing import Any
 
 import pytest
 import requests
 
 from silmaril_security.sdk import (
-    CHUNK_WINDOW_CHARS,
-    DEFAULT_CHUNK_CONCURRENCY,
     OUTCOME_SECRET_EXPOSURE,
     BatchFirewallBlockedException,
     BatchPromptBlockedException,
@@ -63,16 +59,6 @@ def test_deprecated_exception_names_alias_new_names():
     assert BatchPromptBlockedException is BatchFirewallBlockedException
 
 
-def test_constructor_validates_chunk_concurrency():
-    with pytest.raises(ValueError, match="chunk_concurrency must be >= 1"):
-        Firewall(api_key="sk", api_url=TEST_API_URL, chunk_concurrency=0)
-
-
-def test_constructor_applies_default_chunk_concurrency():
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
-    assert fw.chunk_concurrency == DEFAULT_CHUNK_CONCURRENCY
-
-
 def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
     fw = Firewall(api_key="sk-test", api_url=TEST_API_URL)
     calls: list[dict[str, Any]] = []
@@ -104,11 +90,8 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         "metadata": {
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.4.2",
+                "sdk_version": "0.5.0",
                 "request_id": "req-test",
-                "input_index": 0,
-                "chunk_index": 0,
-                "chunk_count": 1,
             }
         },
     }
@@ -148,11 +131,8 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
             },
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.4.2",
+                "sdk_version": "0.5.0",
                 "request_id": "req-meta",
-                "input_index": 0,
-                "chunk_index": 0,
-                "chunk_count": 1,
             },
         },
     }
@@ -162,15 +142,15 @@ def test_classify_enforces_by_default(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5})
+        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.1, "threshold": 0.9})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
     with pytest.raises(FirewallBlockedException) as exc_info:
         fw.classify("ignore previous", hook=HookLabel.USER_INPUT, tool_name="chat")
 
-    assert exc_info.value.score == 0.91
-    assert exc_info.value.threshold == 0.5
+    assert exc_info.value.score == 0.1
+    assert exc_info.value.threshold == 0.9
     assert exc_info.value.hook == HookLabel.USER_INPUT
     assert exc_info.value.tool_name == "chat"
     assert exc_info.value.result is not None
@@ -246,8 +226,8 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     assert body["hooks"] == ["user_input", "tool_response", "tool_response"]
     assert body["tool_names"] == ["chat", "read_file", None]
     assert [item["silmaril"]["input_index"] for item in body["metadata"]] == [0, 1, 2]
-    assert [item["silmaril"]["chunk_index"] for item in body["metadata"]] == [0, 0, 0]
-    assert [item["silmaril"]["chunk_count"] for item in body["metadata"]] == [1, 1, 1]
+    assert all("chunk_index" not in item["silmaril"] for item in body["metadata"])
+    assert all("chunk_count" not in item["silmaril"] for item in body["metadata"])
 
 
 def test_classify_batch_serializes_metadata(monkeypatch):
@@ -284,21 +264,17 @@ def test_classify_batch_serializes_metadata(monkeypatch):
                 "langgraph": {"run_id": "run-a"},
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.4.2",
+                    "sdk_version": "0.5.0",
                     "request_id": "batch-req",
                     "input_index": 0,
-                    "chunk_index": 0,
-                    "chunk_count": 1,
                 },
             },
             {
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.4.2",
+                    "sdk_version": "0.5.0",
                     "request_id": "batch-req",
                     "input_index": 1,
-                    "chunk_index": 0,
-                    "chunk_count": 1,
                 }
             },
         ],
@@ -334,130 +310,54 @@ def test_classify_batch_rejects_bad_lengths():
         fw.classify_batch([])
 
 
-def test_classify_fans_out_long_input_chunks_and_picks_max_score(monkeypatch):
+def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
     calls: list[dict[str, Any]] = []
-    scores_by_chunk = {0: 0.2, 1: 0.95, 2: 0.4, 3: 0.1}
-    lock = threading.Lock()
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        body = json.loads(kwargs["data"])
-        chunk_index = body["metadata"]["silmaril"]["chunk_index"]
-        with lock:
-            calls.append({"url": url, **kwargs})
-        score = scores_by_chunk[chunk_index]
-        prediction = "MALICIOUS" if score >= 0.5 else "BENIGN"
-        return FakeResponse(200, {"prediction": prediction, "score": score, "threshold": 0.5})
-
-    monkeypatch.setattr(fw._session, "post", fake_post)
-
-    result = fw.classify(
-        "a" * (CHUNK_WINDOW_CHARS * 3),
-        hook=HookLabel.USER_INPUT,
-        request_id="chunk-req",
-    )
-
-    assert result.prediction == "MALICIOUS"
-    assert result.score == 0.95
-    assert len(calls) > 1
-    bodies = [json.loads(call["data"]) for call in calls]
-    assert sorted(body["metadata"]["silmaril"]["chunk_index"] for body in bodies) == list(
-        range(len(calls))
-    )
-    for body in bodies:
-        index = body["metadata"]["silmaril"]["chunk_index"]
-        assert "text" in body
-        assert "texts" not in body
-        assert body["hook"] == "user_input"
-        assert "threshold" not in body
-        assert body["metadata"]["silmaril"] == {
-            "sdk_language": "python",
-            "sdk_version": "0.4.2",
-            "request_id": "chunk-req",
-            "input_index": 0,
-            "chunk_index": index,
-            "chunk_count": len(calls),
-        }
-
-
-def test_classify_fanout_propagates_tool_name_to_every_chunk(monkeypatch):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
-    calls: list[dict[str, Any]] = []
-    lock = threading.Lock()
-
-    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        with lock:
-            calls.append({"url": url, **kwargs})
+        calls.append({"url": url, **kwargs})
         return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    fw.classify(
-        "b" * (CHUNK_WINDOW_CHARS * 2),
+    text = "b" * 4001
+    result = fw.classify(
+        text,
         hook=HookLabel.TOOL_RESPONSE,
         tool_name="fetch_webpage",
-        metadata={"langgraph": {"run_id": "run-chunked"}},
-        request_id="chunk-meta",
+        metadata={"conversationId": "conversation-123", "conversation_id": "inert"},
+        request_id="event-uuid",
     )
 
-    assert len(calls) > 1
-    for call in calls:
-        body = json.loads(call["data"])
-        assert body["hook"] == "tool_response"
-        assert body["tool_name"] == "fetch_webpage"
-        assert body["metadata"]["langgraph"] == {"run_id": "run-chunked"}
-        assert body["metadata"]["silmaril"]["request_id"] == "chunk-meta"
-        assert body["metadata"]["silmaril"]["chunk_count"] == len(calls)
-        assert "texts" not in body
+    assert result.prediction == "BENIGN"
+    assert len(calls) == 1
+    body = json.loads(calls[0]["data"])
+    assert body == {
+        "text": text,
+        "hook": "tool_response",
+        "tool_name": "fetch_webpage",
+        "metadata": {
+            "conversationId": "conversation-123",
+            "conversation_id": "inert",
+            "silmaril": {
+                "sdk_language": "python",
+                "sdk_version": "0.5.0",
+                "request_id": "event-uuid",
+            },
+        },
+    }
 
 
-def test_classify_chunk_concurrency_limit(monkeypatch):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL, chunk_concurrency=2, shadow_mode=True)
-    active = 0
-    max_active = 0
-    calls = 0
-    lock = threading.Lock()
-
-    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        nonlocal active, max_active, calls
-        with lock:
-            active += 1
-            calls += 1
-            max_active = max(max_active, active)
-        time.sleep(0.01)
-        with lock:
-            active -= 1
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
-
-    monkeypatch.setattr(fw._session, "post", fake_post)
-
-    fw.classify("c" * (CHUNK_WINDOW_CHARS * 5))
-
-    assert calls > 2
-    assert max_active <= 2
-
-
-def test_classify_long_input_propagates_chunk_error(monkeypatch):
+def test_classify_requires_backend_prediction(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
-    calls = 0
-    lock = threading.Lock()
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        nonlocal calls
-        with lock:
-            calls += 1
-            current = calls
-        if current == 1:
-            return FakeResponse(400, "boom", reason="Bad Request")
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
+        return FakeResponse(200, {"score": 0.99, "threshold": 0.5})
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    with pytest.raises(SilmarilApiError) as exc_info:
-        fw.classify("d" * (CHUNK_WINDOW_CHARS * 2))
-
-    assert exc_info.value.status == 400
-    assert calls > 1
+    with pytest.raises(ValueError, match="missing required 'prediction' field"):
+        fw.classify("missing prediction")
 
 
 def test_optional_outcome_fields(monkeypatch):

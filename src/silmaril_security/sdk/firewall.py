@@ -8,16 +8,13 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 from typing import Any
 from uuid import uuid4
 
 import requests
-from typing_extensions import deprecated
 
 from silmaril_security.sdk._version import VERSION
-from silmaril_security.sdk.chunking import chunk_text
 from silmaril_security.sdk.exceptions import (
     BatchFirewallBlockedException,
     FirewallBlockedException,
@@ -29,47 +26,31 @@ from silmaril_security.sdk.outcomes import (
     normalize_harmful_outcome_int_map,
     normalize_primary_outcome,
 )
+from silmaril_security.sdk.sanitization import sanitize_text
 from silmaril_security.sdk.types import (
     BlockedBatchItem,
     BlockResult,
     ClassificationMetadata,
     ClassifyEvent,
-    Prediction,
 )
 
 LOG = logging.getLogger("silmaril_security.sdk")
 
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_MAX_RETRIES = 5
-DEFAULT_CHUNK_CONCURRENCY = 8
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _MAX_BACKOFF_SECONDS = 30.0
 _MAX_ERROR_BODY_BYTES = 1 << 16
 
 
-@deprecated("Thresholds are tenant-owned by the Firewall backend.")
-def adaptive_threshold(chunk_count: int) -> float:
-    """Return the legacy adaptive threshold for a scoring-opportunity count."""
-    import math
-
-    if chunk_count < 1:
-        raise ValueError(f"Firewall: chunk_count must be >= 1, got {chunk_count}")
-    if chunk_count == 1:
-        return 0.5
-    target_chunk_fpr = 1.0 - math.pow(1.0 - 0.01, 1.0 / chunk_count)
-    odds_ratio = 0.01 / target_chunk_fpr
-    raw_threshold = odds_ratio / (1.0 + odds_ratio)
-    return min(raw_threshold, 0.9)
-
-
-def _prediction_for_score(score: float, threshold: float) -> Prediction:
-    return "MALICIOUS" if score >= threshold else "BENIGN"
-
-
 def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
     score = float(data["score"])
     threshold = float(data["threshold"])
-    prediction = data.get("prediction") or _prediction_for_score(score, threshold)
+    prediction = data.get("prediction")
+    if prediction is None:
+        raise ValueError(
+            "Firewall: backend response missing required 'prediction' field"
+        )
     if prediction not in ("BENIGN", "MALICIOUS"):
         raise ValueError(f"Firewall: invalid prediction {prediction!r}")
     primary_raw = data.get("primary_outcome")
@@ -96,9 +77,7 @@ def _sdk_metadata(
     metadata: ClassificationMetadata | None,
     *,
     request_id: str,
-    input_index: int,
-    chunk_index: int,
-    chunk_count: int,
+    input_index: int | None = None,
 ) -> dict[str, Any]:
     payload = dict(metadata) if metadata is not None else {}
     existing = payload.get("silmaril")
@@ -110,9 +89,7 @@ def _sdk_metadata(
             "sdk_language": "python",
             "sdk_version": VERSION,
             "request_id": request_id,
-            "input_index": input_index,
-            "chunk_index": chunk_index,
-            "chunk_count": chunk_count,
+            **({"input_index": input_index} if input_index is not None else {}),
         }
     )
     payload["silmaril"] = namespace
@@ -183,7 +160,6 @@ class Firewall:
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         session: requests.Session | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        chunk_concurrency: int = DEFAULT_CHUNK_CONCURRENCY,
     ) -> None:
         if not api_key:
             raise ValueError("Firewall: api_key is required")
@@ -193,18 +169,12 @@ class Firewall:
             raise ValueError(f"Firewall: timeout must be non-negative, got {timeout}")
         if max_retries < 0:
             raise ValueError(f"Firewall: max_retries must be non-negative, got {max_retries}")
-        if chunk_concurrency < 1:
-            raise ValueError(
-                f"Firewall: chunk_concurrency must be >= 1, got {chunk_concurrency}"
-            )
-
         self.api_key = api_key
         self.api_url = api_url
         self.timeout = timeout
         self.shadow_mode = shadow_mode
         self.on_classify = on_classify
         self.max_retries = max_retries
-        self.chunk_concurrency = chunk_concurrency
         self._session = session or requests.Session()
         self._session.headers.update(
             {
@@ -318,41 +288,12 @@ class Firewall:
         metadata: ClassificationMetadata | None = None,
         request_id: str,
     ) -> BlockResult:
-        chunks = chunk_text(text)
-        if len(chunks) == 1:
-            return self._classify_single_raw(
-                chunks[0],
-                hook=hook,
-                tool_name=tool_name,
-                metadata=_sdk_metadata(
-                    metadata,
-                    request_id=request_id,
-                    input_index=0,
-                    chunk_index=0,
-                    chunk_count=1,
-                ),
-            )
-
-        workers = min(self.chunk_concurrency, len(chunks))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(
-                executor.map(
-                    lambda item: self._classify_single_raw(
-                        item[1],
-                        hook=hook,
-                        tool_name=tool_name,
-                        metadata=_sdk_metadata(
-                            metadata,
-                            request_id=request_id,
-                            input_index=0,
-                            chunk_index=item[0],
-                            chunk_count=len(chunks),
-                        ),
-                    ),
-                    enumerate(chunks),
-                )
-            )
-        return max(results, key=lambda result: result.score)
+        return self._classify_single_raw(
+            sanitize_text(text),
+            hook=hook,
+            tool_name=tool_name,
+            metadata=_sdk_metadata(metadata, request_id=request_id),
+        )
 
     def _classify_single_raw(
         self,
@@ -382,7 +323,7 @@ class Firewall:
         metadata: Sequence[ClassificationMetadata | None] | None = None,
         request_id: str,
     ) -> list[BlockResult]:
-        text_list = list(texts)
+        text_list = [sanitize_text(text) for text in texts]
         if not text_list:
             raise ValueError("Firewall: texts must not be empty")
         if hooks is not None and len(hooks) != len(text_list):
@@ -410,8 +351,6 @@ class Firewall:
                 metadata[index] if metadata is not None else None,
                 request_id=request_id,
                 input_index=index,
-                chunk_index=0,
-                chunk_count=1,
             )
             for index in range(len(text_list))
         ]
@@ -481,7 +420,7 @@ class Firewall:
             tool_name=tool_name,
             text=text,
             result=result,
-            blocked=result.score >= result.threshold,
+            blocked=result.prediction == "MALICIOUS",
             shadow_mode=shadow_mode,
         )
 

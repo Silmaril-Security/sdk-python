@@ -5,16 +5,6 @@
 from __future__ import annotations
 
 from silmaril_security.sdk._version import VERSION
-from silmaril_security.sdk.chunking import (
-    CHARS_PER_TOKEN,
-    CHUNK_OVERLAP,
-    CHUNK_OVERLAP_CHARS,
-    CHUNK_WINDOW,
-    CHUNK_WINDOW_CHARS,
-    MAX_INPUT_CHARS,
-    MAX_INPUT_TOKENS,
-    chunk_text,
-)
 from silmaril_security.sdk.exceptions import (
     APIError,
     BatchFirewallBlockedException,
@@ -24,7 +14,6 @@ from silmaril_security.sdk.exceptions import (
     SilmarilApiError,
 )
 from silmaril_security.sdk.firewall import (
-    DEFAULT_CHUNK_CONCURRENCY,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
     Firewall,
@@ -78,14 +67,8 @@ __all__ = [
     "BlockedBatchItem",
     "BatchFirewallBlockedException",
     "BatchPromptBlockedException",
-    "CHARS_PER_TOKEN",
-    "CHUNK_OVERLAP",
-    "CHUNK_OVERLAP_CHARS",
-    "CHUNK_WINDOW",
-    "CHUNK_WINDOW_CHARS",
     "ClassificationMetadata",
     "ClassifyEvent",
-    "DEFAULT_CHUNK_CONCURRENCY",
     "DEFAULT_HOOKS",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_TIMEOUT",
@@ -97,8 +80,6 @@ __all__ = [
     "HarmfulOutcome",
     "HookLabel",
     "INPUT_HOOKS",
-    "MAX_INPUT_CHARS",
-    "MAX_INPUT_TOKENS",
     "OUTCOME_BENIGN",
     "OUTCOME_CONTROL_ABUSE",
     "OUTCOME_DESCRIPTIONS",
@@ -113,7 +94,6 @@ __all__ = [
     "PromptBlockedException",
     "SilmarilApiError",
     "SilmarilFirewall",
-    "chunk_text",
     "is_harmful_outcome",
     "is_primary_outcome",
     "normalize_harmful_outcome",
