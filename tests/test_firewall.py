@@ -356,7 +356,7 @@ def test_classify_requires_backend_prediction(monkeypatch):
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    with pytest.raises(ValueError, match="invalid prediction"):
+    with pytest.raises(ValueError, match="missing required 'prediction' field"):
         fw.classify("missing prediction")
 
 

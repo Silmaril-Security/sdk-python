@@ -47,6 +47,10 @@ def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
     score = float(data["score"])
     threshold = float(data["threshold"])
     prediction = data.get("prediction")
+    if prediction is None:
+        raise ValueError(
+            "Firewall: backend response missing required 'prediction' field"
+        )
     if prediction not in ("BENIGN", "MALICIOUS"):
         raise ValueError(f"Firewall: invalid prediction {prediction!r}")
     primary_raw = data.get("primary_outcome")
