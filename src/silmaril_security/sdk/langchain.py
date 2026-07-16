@@ -445,14 +445,12 @@ async def _async_classify_raw(
     metadata: ClassificationMetadata | None = None,
     request_id: str | None = None,
 ) -> BlockResult:
-    import asyncio
-
     import httpx
 
     from silmaril_security.sdk.firewall import _block_result_from_json, _sdk_metadata
     from silmaril_security.sdk.hooks import hook_value
+    from silmaril_security.sdk.sanitization import sanitize_text
 
-    chunks = __import__("silmaril_security.sdk.chunking", fromlist=["chunk_text"]).chunk_text(text)
     request_id_value = request_id or str(uuid4())
     headers = {"x-api-key": firewall.api_key, "content-type": "application/json"}
     async with httpx.AsyncClient(
@@ -460,52 +458,18 @@ async def _async_classify_raw(
         timeout=firewall.timeout,
         follow_redirects=False,
     ) as client:
-        if len(chunks) == 1:
-            payload: dict[str, Any] = {"text": chunks[0]}
-            hook_str = hook_value(hook)
-            if hook_str:
-                payload["hook"] = hook_str
-            if tool_name:
-                payload["tool_name"] = tool_name
-            payload["metadata"] = _sdk_metadata(
-                metadata,
-                request_id=request_id_value,
-                input_index=0,
-                chunk_index=0,
-                chunk_count=1,
-            )
-            data = await _async_post_json(client, firewall, payload)
-            return _block_result_from_json(data)
-
-        semaphore = asyncio.Semaphore(firewall.chunk_concurrency)
-
-        async def classify_chunk(index: int, chunk: str) -> BlockResult:
-            payload: dict[str, Any] = {"text": chunk}
-            hook_str = hook_value(hook)
-            if hook_str:
-                payload["hook"] = hook_str
-            if tool_name:
-                payload["tool_name"] = tool_name
-            payload["metadata"] = _sdk_metadata(
-                metadata,
-                request_id=request_id_value,
-                input_index=0,
-                chunk_index=index,
-                chunk_count=len(chunks),
-            )
-            async with semaphore:
-                data = await _async_post_json(client, firewall, payload)
-            return _block_result_from_json(data)
-
-        chunk_results = await asyncio.gather(
-            *(classify_chunk(index, chunk) for index, chunk in enumerate(chunks)),
-            return_exceptions=True,
+        payload: dict[str, Any] = {"text": sanitize_text(text)}
+        hook_str = hook_value(hook)
+        if hook_str:
+            payload["hook"] = hook_str
+        if tool_name:
+            payload["tool_name"] = tool_name
+        payload["metadata"] = _sdk_metadata(
+            metadata,
+            request_id=request_id_value,
         )
-        for result in chunk_results:
-            if isinstance(result, BaseException):
-                raise result
-        results = [result for result in chunk_results if isinstance(result, BlockResult)]
-        return max(results, key=lambda result: result.score)
+        data = await _async_post_json(client, firewall, payload)
+        return _block_result_from_json(data)
 
 
 async def _async_post_json(client: Any, firewall: Firewall, payload: dict[str, Any]) -> dict[str, Any]:

@@ -8,7 +8,6 @@ from uuid import uuid4
 import pytest
 
 from silmaril_security.sdk import (
-    CHUNK_WINDOW_CHARS,
     BlockResult,
     ClassifyEvent,
     Firewall,
@@ -113,70 +112,40 @@ async def test_async_langchain_handler_supports_async_callback(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_async_classify_raw_fans_out_long_input_chunks(monkeypatch):
+async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     from silmaril_security.sdk.langchain import _async_classify_raw
 
-    fw = Firewall(
-        api_key="sk",
-        api_url="https://api.test.invalid/classify",
-        chunk_concurrency=2,
-    )
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     payloads = []
-    active = 0
-    max_active = 0
 
     async def fake_post_json(client, firewall, payload):
-        nonlocal active, max_active
         payloads.append(payload)
-        chunk_index = payload["metadata"]["silmaril"]["chunk_index"]
-        active += 1
-        max_active = max(max_active, active)
-        try:
-            import asyncio
-
-            await asyncio.sleep(0)
-            score = 0.95 if chunk_index == 1 else 0.1
-            return {
-                "prediction": "MALICIOUS" if score >= 0.5 else "BENIGN",
-                "score": score,
-                "threshold": 0.5,
-            }
-        finally:
-            active -= 1
+        return {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5}
 
     monkeypatch.setattr("silmaril_security.sdk.langchain._async_post_json", fake_post_json)
 
     result = await _async_classify_raw(
         fw,
-        "a" * (CHUNK_WINDOW_CHARS * 3),
+        "a" * 4001,
         hook=HookLabel.USER_INPUT,
         tool_name="chat",
         metadata={"langgraph": {"run_id": "async-run"}},
         request_id="async-req",
     )
 
-    assert result.score == 0.95
-    assert len(payloads) > 1
-    assert max_active <= 2
-    assert sorted(payload["metadata"]["silmaril"]["chunk_index"] for payload in payloads) == list(
-        range(len(payloads))
-    )
-    for payload in payloads:
-        index = payload["metadata"]["silmaril"]["chunk_index"]
-        assert "text" in payload
-        assert "texts" not in payload
-        assert payload["hook"] == "user_input"
-        assert payload["tool_name"] == "chat"
-        assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
-        assert payload["metadata"]["silmaril"] == {
-            "sdk_language": "python",
-            "sdk_version": "0.4.2",
-            "request_id": "async-req",
-            "input_index": 0,
-            "chunk_index": index,
-            "chunk_count": len(payloads),
-        }
-        assert "threshold" not in payload
+    assert result.score == 0.1
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["text"] == "a" * 4001
+    assert payload["hook"] == "user_input"
+    assert payload["tool_name"] == "chat"
+    assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
+    assert payload["metadata"]["silmaril"] == {
+        "sdk_language": "python",
+        "sdk_version": "0.5.0",
+        "request_id": "async-req",
+    }
+    assert "threshold" not in payload
 
 
 @pytest.mark.asyncio
