@@ -27,6 +27,12 @@ def test_outcome_taxonomy_exports_ordered_values():
         "control_abuse",
         "system_compromise",
         "service_disruption",
+        "code_generation",
+        "story_script_generation",
+        "game_generation",
+        "website_generation",
+        "clickup_terms_violation",
+        "traditional_ai_abuse",
     )
     assert HARMFUL_OUTCOMES == PRIMARY_OUTCOMES[1:]
     assert OUTCOME_DESCRIPTIONS[OUTCOME_BENIGN]
