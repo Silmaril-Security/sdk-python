@@ -151,11 +151,17 @@ application routing instead of raising on blocked input:
 ```python
 from silmaril_security.sdk import (
     HookLabel,
+    OUTCOME_CLICKUP_TERMS_VIOLATION,
+    OUTCOME_CODE_GENERATION,
     OUTCOME_CONTROL_ABUSE,
+    OUTCOME_GAME_GENERATION,
     OUTCOME_INFORMATION_DISCLOSURE,
     OUTCOME_SECRET_EXPOSURE,
     OUTCOME_SERVICE_DISRUPTION,
+    OUTCOME_STORY_SCRIPT_GENERATION,
     OUTCOME_SYSTEM_COMPROMISE,
+    OUTCOME_TRADITIONAL_AI_ABUSE,
+    OUTCOME_WEBSITE_GENERATION,
 )
 
 result = fw.classify(user_input, hook=HookLabel.USER_INPUT, shadow_mode=True)
@@ -172,6 +178,15 @@ elif result.primary_outcome == OUTCOME_SYSTEM_COMPROMISE:
     block_and_escalate(result)
 elif result.primary_outcome == OUTCOME_SERVICE_DISRUPTION:
     block_disruptive_action(result)
+elif result.primary_outcome in {
+    OUTCOME_CODE_GENERATION,
+    OUTCOME_STORY_SCRIPT_GENERATION,
+    OUTCOME_GAME_GENERATION,
+    OUTCOME_WEBSITE_GENERATION,
+    OUTCOME_CLICKUP_TERMS_VIOLATION,
+    OUTCOME_TRADITIONAL_AI_ABUSE,
+}:
+    apply_tenant_policy(result)
 else:
     block_by_default(result)
 ```
@@ -184,6 +199,12 @@ Outcome taxonomy:
 - `control_abuse`: misuse of authorized tools or user privileges to send, change, approve, delete, operate, or bypass policy/RBAC without a stronger outcome.
 - `system_compromise`: privilege escalation, account takeover, hostile integration/plugin takeover, persistence, lateral movement, attacker webhook registration, or code/plugin execution.
 - `service_disruption`: downtime, lockout, degradation, alert suppression, destructive loops, resource exhaustion, cost spikes, or hidden outage evidence.
+- `code_generation`: generation or material modification of executable code, scripts, workflows, or configuration.
+- `story_script_generation`: generation of narrative prose, dialogue, scripts, or story artifacts.
+- `game_generation`: generation of a game, quest, level, mechanic, or playable experience.
+- `website_generation`: generation of a website, landing page, storefront, or web experience.
+- `clickup_terms_violation`: content or actions that violate the configured ClickUp tenant policy.
+- `traditional_ai_abuse`: unsafe AI assistance outside the concrete security outcome classes.
 
 ## Backend Thresholding
 
