@@ -40,7 +40,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.5.0
+pip install silmaril-security-sdk==0.5.1
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
