@@ -2,6 +2,15 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.5.1 - 2026-07-29
+
+- Add typed support for `code_generation`, `story_script_generation`,
+  `game_generation`, `website_generation`, `clickup_terms_violation`, and
+  `traditional_ai_abuse`.
+- Extend ordered outcome collections, descriptions, validators, normalization
+  fixtures, exports, and documentation without changing the `/classify` wire
+  shape.
+
 ## 0.5.0 - 2026-07-15
 
 - Send every `classify()` input as one complete event without client chunking.

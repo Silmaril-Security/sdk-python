@@ -142,7 +142,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
     assert payload["metadata"]["silmaril"] == {
         "sdk_language": "python",
-        "sdk_version": "0.5.0",
+        "sdk_version": "0.5.1",
         "request_id": "async-req",
     }
     assert "threshold" not in payload

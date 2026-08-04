@@ -90,7 +90,7 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         "metadata": {
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.5.0",
+                "sdk_version": "0.5.1",
                 "request_id": "req-test",
             }
         },
@@ -131,7 +131,7 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
             },
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.5.0",
+                "sdk_version": "0.5.1",
                 "request_id": "req-meta",
             },
         },
@@ -264,7 +264,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
                 "langgraph": {"run_id": "run-a"},
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.5.0",
+                    "sdk_version": "0.5.1",
                     "request_id": "batch-req",
                     "input_index": 0,
                 },
@@ -272,7 +272,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
             {
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.5.0",
+                    "sdk_version": "0.5.1",
                     "request_id": "batch-req",
                     "input_index": 1,
                 }
@@ -341,7 +341,7 @@ def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
             "conversation_id": "inert",
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.5.0",
+                "sdk_version": "0.5.1",
                 "request_id": "event-uuid",
             },
         },
