@@ -29,7 +29,12 @@ from silmaril_security.sdk.hooks import (
     HookLabel,
     resolve_hooks,
 )
-from silmaril_security.sdk.types import BlockResult, ClassificationMetadata, ClassifyEvent
+from silmaril_security.sdk.types import (
+    BlockResult,
+    ClassificationMetadata,
+    ClassifyEvent,
+    FirewallMode,
+)
 
 try:
     from langchain_core.callbacks import AsyncCallbackHandler, BaseCallbackHandler
@@ -60,6 +65,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         include_system: bool = True,
         include_tool: bool = True,
         fail_open: bool = True,
+        mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         logger: logging.Logger | None = None,
@@ -70,7 +76,12 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         self.include_system = include_system
         self.include_tool = include_tool
         self.fail_open = fail_open
-        self.shadow_mode = firewall.shadow_mode if shadow_mode is None else shadow_mode
+        self.mode = mode or (
+            ("shadow" if shadow_mode else "block")
+            if shadow_mode is not None
+            else firewall.mode
+        )
+        self.shadow_mode = self.mode == "shadow"
         self.on_classify = on_classify
         self.logger = logger or LOG
 
@@ -95,6 +106,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
                 hook=hook_label,
                 tool_name=tool_name,
                 request_id=str(run_id),
+                mode=self.mode,
             )
         except Exception:
             if not self.fail_open:
@@ -105,17 +117,18 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             )
             return
 
-        blocked = result.score >= result.threshold
+        blocked = result.prediction == "MALICIOUS"
         event = ClassifyEvent(
             hook=hook_label,
             tool_name=tool_name,
             text=text,
             result=result,
             blocked=blocked,
-            shadow_mode=self.shadow_mode,
+            mode=result.mode,
+            shadow_mode=result.mode == "shadow",
         )
         self._fire_on_classify(event)
-        if blocked and not self.shadow_mode:
+        if blocked and result.mode == "block":
             raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
@@ -255,6 +268,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         include_system: bool = True,
         include_tool: bool = True,
         fail_open: bool = True,
+        mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         on_classify: Callable[[ClassifyEvent], None | Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
@@ -266,6 +280,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             include_system=include_system,
             include_tool=include_tool,
             fail_open=fail_open,
+            mode=mode,
             shadow_mode=shadow_mode,
             on_classify=None,
             logger=logger,
@@ -297,6 +312,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
                 hook=hook_label,
                 tool_name=tool_name,
                 request_id=str(run_id),
+                mode=self._sync_handler.mode,
             )
         except Exception:
             if not self._sync_handler.fail_open:
@@ -307,17 +323,18 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             )
             return
 
-        blocked = result.score >= result.threshold
+        blocked = result.prediction == "MALICIOUS"
         event = ClassifyEvent(
             hook=hook_label,
             tool_name=tool_name,
             text=text,
             result=result,
             blocked=blocked,
-            shadow_mode=self._sync_handler.shadow_mode,
+            mode=result.mode,
+            shadow_mode=result.mode == "shadow",
         )
         await self._fire_on_classify(event)
-        if blocked and not self._sync_handler.shadow_mode:
+        if blocked and result.mode == "block":
             raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
@@ -444,6 +461,7 @@ async def _async_classify_raw(
     tool_name: str | None,
     metadata: ClassificationMetadata | None = None,
     request_id: str | None = None,
+    mode: FirewallMode | None = None,
 ) -> BlockResult:
     import httpx
 
@@ -459,6 +477,8 @@ async def _async_classify_raw(
         follow_redirects=False,
     ) as client:
         payload: dict[str, Any] = {"text": sanitize_text(text)}
+        if mode is not None:
+            payload["mode"] = mode
         hook_str = hook_value(hook)
         if hook_str:
             payload["hook"] = hook_str
@@ -469,7 +489,7 @@ async def _async_classify_raw(
             request_id=request_id_value,
         )
         data = await _async_post_json(client, firewall, payload)
-        return _block_result_from_json(data)
+        return _block_result_from_json(data, mode)
 
 
 async def _async_post_json(client: Any, firewall: Firewall, payload: dict[str, Any]) -> dict[str, Any]:

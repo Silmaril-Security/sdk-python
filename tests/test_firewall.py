@@ -44,6 +44,17 @@ class FakeResponse:
 
     def json(self) -> dict[str, Any]:
         assert isinstance(self._body, dict)
+        if isinstance(self._body.get("prediction"), str):
+            return {"mode": "block", **self._body}
+        predictions = self._body.get("predictions")
+        if isinstance(predictions, list):
+            return {
+                **self._body,
+                "predictions": [
+                    {"mode": "block", **item} if isinstance(item, dict) else item
+                    for item in predictions
+                ],
+            }
         return self._body
 
 
@@ -76,7 +87,12 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         request_id="req-test",
     )
 
-    assert result == BlockResult(prediction="BENIGN", score=0.12, threshold=0.5)
+    assert result == BlockResult(
+        prediction="BENIGN",
+        score=0.12,
+        threshold=0.5,
+        mode="block",
+    )
     assert fw._session.headers["x-api-key"] == "sk-test"
     assert fw._session.headers["content-type"] == "application/json"
     assert calls[0]["url"] == TEST_API_URL
@@ -90,7 +106,7 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         "metadata": {
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.5.1",
+                "sdk_version": "0.6.0",
                 "request_id": "req-test",
             }
         },
@@ -131,18 +147,26 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
             },
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.5.1",
+                "sdk_version": "0.6.0",
                 "request_id": "req-meta",
             },
         },
     }
 
 
-def test_classify_enforces_by_default(monkeypatch):
+def test_classify_enforces_backend_block_mode(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.1, "threshold": 0.9})
+        return FakeResponse(
+            200,
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.1,
+                "threshold": 0.9,
+                "mode": "block",
+            },
+        )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -166,7 +190,15 @@ def test_classify_shadow_mode_suppresses_block_and_emits_event(monkeypatch):
     )
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5})
+        return FakeResponse(
+            200,
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "mode": "shadow",
+            },
+        )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -189,6 +221,86 @@ def test_classify_per_call_shadow_mode_override(monkeypatch):
 
     with pytest.raises(FirewallBlockedException):
         fw.classify("attack", shadow_mode=False)
+
+
+def test_classify_omits_mode_for_backend_control_and_consumes_effective_warn(monkeypatch):
+    events = []
+    calls: list[dict[str, Any]] = []
+    fw = Firewall(
+        api_key="sk",
+        api_url=TEST_API_URL,
+        on_classify=events.append,
+    )
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append(kwargs)
+        return FakeResponse(
+            200,
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "mode": "warn",
+            },
+        )
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    result = fw.classify("attack", request_id="req-warn")
+
+    assert "mode" not in json.loads(calls[0]["data"])
+    assert result.mode == "warn"
+    assert events[0].mode == "warn"
+    assert events[0].shadow_mode is False
+
+
+def test_explicit_mode_precedes_legacy_shadow_mode(monkeypatch):
+    calls: list[dict[str, Any]] = []
+    fw = Firewall(
+        api_key="sk",
+        api_url=TEST_API_URL,
+        mode="warn",
+        shadow_mode=False,
+    )
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append(kwargs)
+        return FakeResponse(
+            200,
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "mode": "shadow",
+            },
+        )
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    result = fw.classify("attack", mode="block", shadow_mode=True, request_id="req-mode")
+
+    assert json.loads(calls[0]["data"])["mode"] == "block"
+    assert result.mode == "shadow"
+
+
+def test_classify_rejects_invalid_backend_mode(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        return FakeResponse(
+            200,
+            {
+                "prediction": "BENIGN",
+                "score": 0.1,
+                "threshold": 0.5,
+                "mode": "enforce",
+            },
+        )
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+
+    with pytest.raises(ValueError, match="backend mode must be shadow, warn, or block"):
+        fw.classify("payload")
 
 
 def test_classify_batch_wire_shape_and_block_error(monkeypatch):
@@ -264,7 +376,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
                 "langgraph": {"run_id": "run-a"},
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.5.1",
+                    "sdk_version": "0.6.0",
                     "request_id": "batch-req",
                     "input_index": 0,
                 },
@@ -272,7 +384,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
             {
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.5.1",
+                    "sdk_version": "0.6.0",
                     "request_id": "batch-req",
                     "input_index": 1,
                 }
@@ -287,7 +399,16 @@ def test_classify_batch_shadow_mode_returns_results(monkeypatch):
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         return FakeResponse(
             200,
-            {"predictions": [{"prediction": "MALICIOUS", "score": 0.8, "threshold": 0.5}]},
+            {
+                "predictions": [
+                    {
+                        "prediction": "MALICIOUS",
+                        "score": 0.8,
+                        "threshold": 0.5,
+                        "mode": "shadow",
+                    }
+                ]
+            },
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
@@ -334,6 +455,7 @@ def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
     body = json.loads(calls[0]["data"])
     assert body == {
         "text": text,
+        "mode": "shadow",
         "hook": "tool_response",
         "tool_name": "fetch_webpage",
         "metadata": {
@@ -341,7 +463,7 @@ def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
             "conversation_id": "inert",
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.5.1",
+                "sdk_version": "0.6.0",
                 "request_id": "event-uuid",
             },
         },
@@ -370,6 +492,7 @@ def test_optional_outcome_fields(monkeypatch):
                 "prediction": "MALICIOUS",
                 "score": 0.91,
                 "threshold": 0.5,
+                "mode": "shadow",
                 "primary_outcome": OUTCOME_SECRET_EXPOSURE,
                 "outcome_scores": {OUTCOME_SECRET_EXPOSURE: 0.8},
                 "detector_scores": {OUTCOME_SECRET_EXPOSURE: 1.0},

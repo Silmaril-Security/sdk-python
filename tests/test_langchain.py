@@ -26,9 +26,14 @@ def test_langchain_handler_blocks_last_user_message(monkeypatch):
     handler = fw.as_langchain_handler(on_classify=events.append)
     calls = []
 
-    def fake_raw(text, *, hook=None, tool_name=None, request_id=None):
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
         calls.append((text, hook, tool_name, request_id))
-        return BlockResult(prediction="MALICIOUS", score=0.9, threshold=0.5)
+        return BlockResult(
+            prediction="MALICIOUS",
+            score=0.9,
+            threshold=0.5,
+            mode="block",
+        )
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
 
@@ -56,7 +61,7 @@ def test_langchain_handler_fail_open(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler()
 
-    def fake_raw(text, *, hook=None, tool_name=None, request_id=None):
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
         raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
@@ -68,11 +73,36 @@ def test_langchain_handler_fail_open(monkeypatch):
     )
 
 
+def test_langchain_effective_warn_preserves_flow(monkeypatch):
+    events: list[ClassifyEvent] = []
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_langchain_handler(mode="block", on_classify=events.append)
+
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
+        return BlockResult(
+            prediction="MALICIOUS",
+            score=0.9,
+            threshold=0.5,
+            mode="warn",
+        )
+
+    monkeypatch.setattr(fw, "_classify_raw", fake_raw)
+
+    handler.on_chat_model_start(
+        serialized={},
+        messages=[[{"role": "user", "content": "hello"}]],
+        run_id=uuid4(),
+    )
+
+    assert events[0].mode == "warn"
+    assert events[0].blocked is True
+
+
 def test_langchain_handler_fail_closed(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler(fail_open=False)
 
-    def fake_raw(text, *, hook=None, tool_name=None, request_id=None):
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
         raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
@@ -95,8 +125,21 @@ async def test_async_langchain_handler_supports_async_callback(monkeypatch):
 
     handler = fw.as_async_langchain_handler(on_classify=on_classify, shadow_mode=True)
 
-    async def fake_async_raw(firewall, text, *, hook=None, tool_name=None, request_id=None):
-        return BlockResult(prediction="MALICIOUS", score=0.9, threshold=0.5)
+    async def fake_async_raw(
+        firewall,
+        text,
+        *,
+        hook=None,
+        tool_name=None,
+        request_id=None,
+        mode=None,
+    ):
+        return BlockResult(
+            prediction="MALICIOUS",
+            score=0.9,
+            threshold=0.5,
+            mode=mode or "block",
+        )
 
     monkeypatch.setattr("silmaril_security.sdk.langchain._async_classify_raw", fake_async_raw)
 
@@ -120,7 +163,12 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
 
     async def fake_post_json(client, firewall, payload):
         payloads.append(payload)
-        return {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5}
+        return {
+            "prediction": "BENIGN",
+            "score": 0.1,
+            "threshold": 0.5,
+            "mode": "block",
+        }
 
     monkeypatch.setattr("silmaril_security.sdk.langchain._async_post_json", fake_post_json)
 
@@ -142,7 +190,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
     assert payload["metadata"]["silmaril"] == {
         "sdk_language": "python",
-        "sdk_version": "0.5.1",
+        "sdk_version": "0.6.0",
         "request_id": "async-req",
     }
     assert "threshold" not in payload

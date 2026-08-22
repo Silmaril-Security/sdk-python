@@ -12,6 +12,7 @@ from silmaril_security.sdk.hooks import HookLabel
 from silmaril_security.sdk.outcomes import HarmfulOutcome, PrimaryOutcome
 
 Prediction = Literal["BENIGN", "MALICIOUS"]
+FirewallMode = Literal["shadow", "warn", "block"]
 ClassificationMetadata = Mapping[str, Any]
 
 
@@ -22,6 +23,7 @@ class BlockResult:
     prediction: Prediction
     score: float
     threshold: float
+    mode: FirewallMode
     primary_outcome: PrimaryOutcome | None = None
     outcome_scores: dict[HarmfulOutcome, float] | None = None
     detector_scores: dict[HarmfulOutcome, float] | None = None
@@ -37,6 +39,7 @@ class ClassifyEvent:
     text: str
     result: BlockResult
     blocked: bool
+    mode: FirewallMode
     shadow_mode: bool
 
 
