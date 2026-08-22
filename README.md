@@ -22,8 +22,8 @@ This SDK provides the low-level Python interface for that workflow:
 - Classify user input, tool calls, tool responses, model output, or system
   prompt content.
 - Preserve hook and tool-name context for more accurate decisions.
-- Enforce backend-owned adaptive thresholds, with shadow mode for
-  observation-only rollout.
+- Enforce backend-owned adaptive thresholds and effective Shadow, Warn, or
+  Block behavior.
 - Send each complete sanitized event in one request.
 - Preserve exact `metadata.conversationId` sequence identity and add one event ID.
 - Retry transient API Gateway and model-serving failures.
@@ -40,7 +40,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.5.1
+pip install silmaril-security-sdk==0.6.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -128,25 +128,28 @@ Firewall(
     api_key: str,                                  # required
     api_url: str,                                  # required
     timeout: float = 10.0,                         # request timeout in seconds
-    shadow_mode: bool = False,                     # observe without blocking when true
+    mode: Literal["shadow", "warn", "block"] | None = None,
+    shadow_mode: bool | None = None,               # deprecated legacy mapping
     on_classify: Callable[[ClassifyEvent], None] | None = None,
     session: requests.Session | None = None,       # optional custom requests session
     max_retries: int = 5,
 )
 ```
 
-`classify()` and `classify_batch()` return the server's prediction, score, and
-the backend threshold applied for that scoring operation. By default, both
-methods raise a typed blocking exception when the backend returns a malicious
-verdict at the applied threshold.
+`classify()` and `classify_batch()` return the server's prediction, score,
+backend threshold, and effective mode. When mode is omitted, the backend
+controls it. A malicious result raises a typed blocking exception only when the
+effective mode is `"block"`. A legacy mode-less response leaves
+`BlockResult.mode` as `None` when no override was requested; direct SDK calls
+retain their pre-0.6 Block default internally.
 
 When a custom `requests.Session` is provided, the SDK preserves it and adds the
 required `x-api-key` and `content-type` headers.
 
 ## Handle Outcomes
 
-Use shadow mode when you want direct `classify()` calls to return the result for
-application routing instead of raising on blocked input:
+Use Shadow or Warn when you want direct `classify()` calls to return a malicious
+result for application routing instead of raising:
 
 ```python
 from silmaril_security.sdk import (
@@ -164,7 +167,7 @@ from silmaril_security.sdk import (
     OUTCOME_WEBSITE_GENERATION,
 )
 
-result = fw.classify(user_input, hook=HookLabel.USER_INPUT, shadow_mode=True)
+result = fw.classify(user_input, hook=HookLabel.USER_INPUT, mode="warn")
 
 if result.prediction == "BENIGN":
     continue_normally()
@@ -219,12 +222,19 @@ The SDK does not send `threshold` in request payloads. The backend owns the
 applied threshold, which remains available on
 `BlockResult.threshold` and exception objects as diagnostic metadata.
 
-## Shadow Mode
+## Modes
 
-`classify()` and `classify_batch()` enforce backend predictions by default.
-Shadow mode keeps the same classification result but suppresses
-`FirewallBlockedException` and `BatchFirewallBlockedException`, so live traffic can
-continue while telemetry records what would have blocked:
+Use `"shadow"`, `"warn"`, or `"block"` only when a request needs to override
+the backend-configured mode. Shadow and Warn preserve the caller flow; Block
+raises `FirewallBlockedException` or `BatchFirewallBlockedException` for a
+malicious decision. Current backends return the effective mode on every result
+and event.
+
+During a rolling upgrade, an explicit request mode remains authoritative if a
+legacy or mixed-version backend omits or disagrees about `mode`. When both the
+request and response omit it, `BlockResult.mode` remains `None`; integrations
+can retain their pre-0.6 behavior without falsely reporting a backend Block
+mode. Direct SDK enforcement retains its pre-0.6 Block default.
 
 ```python
 import logging
@@ -241,7 +251,7 @@ def on_classify(event: ClassifyEvent) -> None:
 fw = Firewall(
     api_key=os.environ["SILMARIL_API_KEY"],
     api_url=os.environ["SILMARIL_API_URL"],
-    shadow_mode=True,
+    mode="shadow",
     on_classify=on_classify,
 )
 
@@ -252,25 +262,26 @@ result = fw.classify(
 print(f"shadow result: {result.prediction} {result.score:.4f}")
 ```
 
-Per-call overrides let you enforce or shadow one surface without changing the
-client default:
+Per-call overrides let you select one surface without changing the client
+default:
 
 ```python
 fw.classify(
     text,
     hook=HookLabel.TOOL_RESPONSE,
-    shadow_mode=False,  # enforce even if the client shadows
+    mode="block",
 )
 
 fw.classify_batch(
     texts,
-    shadow_mode=True,  # observe this batch only
+    mode="warn",
 )
 ```
 
-`ClassifyEvent` includes `hook`, `tool_name`, `text`, `result`, `blocked`, and
-`shadow_mode`. `blocked` is true only when the backend returns
-`prediction="MALICIOUS"`.
+Legacy `shadow_mode=True` maps to Shadow and `shadow_mode=False` maps to Block;
+explicit `mode` takes precedence. `ClassifyEvent` includes `hook`, `tool_name`,
+`text`, `result`, `blocked`, `mode`, and `shadow_mode`. `blocked` records a
+malicious decision; only effective Block mode raises.
 
 ## Hook Labels
 
@@ -332,8 +343,8 @@ fw.classify_batch(
 ## Errors
 
 - `SilmarilApiError`: raised when the firewall API responds with a non-2xx or redirect status. Carries `status`, `status_text`, and a 64 KiB-capped `body`; the default exception message omits the body to keep logs clean.
-- `FirewallBlockedException`: raised by `classify()` in enforcement mode when the backend blocks the request. Carries `score`, `threshold`, `prompt_text`, `hook`, `tool_name`, and `result`.
-- `BatchFirewallBlockedException`: raised by `classify_batch()` in enforcement mode when one or more inputs are blocked. Carries all blocked items with index, text, hook, tool name, and result.
+- `FirewallBlockedException`: raised by `classify()` when a malicious decision has effective Block mode. Carries `score`, `threshold`, `prompt_text`, `hook`, `tool_name`, and `result`.
+- `BatchFirewallBlockedException`: raised by `classify_batch()` when one or more malicious inputs have effective Block mode. Carries all blocked items with index, text, hook, tool name, and result.
 
 `PromptBlockedException` and `BatchPromptBlockedException` remain as deprecated
 aliases for one release.

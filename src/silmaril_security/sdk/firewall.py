@@ -32,6 +32,7 @@ from silmaril_security.sdk.types import (
     BlockResult,
     ClassificationMetadata,
     ClassifyEvent,
+    FirewallMode,
 )
 
 LOG = logging.getLogger("silmaril_security.sdk")
@@ -41,9 +42,36 @@ DEFAULT_MAX_RETRIES = 5
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _MAX_BACKOFF_SECONDS = 30.0
 _MAX_ERROR_BODY_BYTES = 1 << 16
+_LEGACY_RESPONSE_MODE: FirewallMode = "block"
 
 
-def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
+def _validate_mode(value: Any) -> FirewallMode:
+    if value in ("shadow", "warn", "block"):
+        return value
+    raise ValueError("Firewall: backend mode must be shadow, warn, or block")
+
+
+def _normalize_mode(
+    value: Any,
+    requested_mode: FirewallMode | None = None,
+) -> FirewallMode | None:
+    response_mode = _validate_mode(value) if value is not None else None
+    # A supplied mode is the per-request override contract. Prefer it during
+    # rolling upgrades so a missing or stale response field cannot strengthen
+    # enforcement beyond what the caller requested.
+    return requested_mode or response_mode
+
+
+def _legacy_mode(shadow_mode: bool | None) -> FirewallMode | None:
+    if shadow_mode is None:
+        return None
+    return "shadow" if shadow_mode else "block"
+
+
+def _block_result_from_json(
+    data: dict[str, Any],
+    requested_mode: FirewallMode | None = None,
+) -> BlockResult:
     score = float(data["score"])
     threshold = float(data["threshold"])
     prediction = data.get("prediction")
@@ -58,6 +86,7 @@ def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
         prediction=prediction,
         score=score,
         threshold=threshold,
+        mode=_normalize_mode(data.get("mode"), requested_mode),
         primary_outcome=(
             normalize_primary_outcome(primary_raw) if primary_raw is not None else None
         ),
@@ -156,7 +185,8 @@ class Firewall:
         api_key: str,
         api_url: str,
         timeout: float = DEFAULT_TIMEOUT,
-        shadow_mode: bool = False,
+        mode: FirewallMode | None = None,
+        shadow_mode: bool | None = None,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         session: requests.Session | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
@@ -172,7 +202,8 @@ class Firewall:
         self.api_key = api_key
         self.api_url = api_url
         self.timeout = timeout
-        self.shadow_mode = shadow_mode
+        self.mode = _validate_mode(mode) if mode is not None else _legacy_mode(shadow_mode)
+        self.shadow_mode = self.mode == "shadow"
         self.on_classify = on_classify
         self.max_retries = max_retries
         self._session = session or requests.Session()
@@ -190,27 +221,29 @@ class Firewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
+        mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
     ) -> BlockResult:
         """Classify a single text and enforce the backend tenant threshold."""
         request_id_value = request_id or str(uuid4())
+        requested_mode = self._effective_mode(mode, shadow_mode)
         result = self._classify_raw(
             text,
             hook=hook,
             tool_name=tool_name,
             metadata=metadata,
             request_id=request_id_value,
+            mode=requested_mode,
         )
         event = self._new_classify_event(
             text=text,
             hook=hook,
             tool_name=tool_name,
             result=result,
-            shadow_mode=self._effective_shadow_mode(shadow_mode),
         )
         self._fire_on_classify(event)
-        if event.blocked and not event.shadow_mode:
+        if event.blocked and event.mode == "block":
             raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
@@ -228,19 +261,21 @@ class Firewall:
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
+        mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
     ) -> list[BlockResult]:
         """Classify multiple independent texts and enforce backend tenant thresholds."""
         request_id_value = request_id or str(uuid4())
+        requested_mode = self._effective_mode(mode, shadow_mode)
         results = self._classify_batch_raw(
             texts,
             hooks=hooks,
             tool_names=tool_names,
             metadata=metadata,
             request_id=request_id_value,
+            mode=requested_mode,
         )
-        effective_shadow = self._effective_shadow_mode(shadow_mode)
         blocked: list[BlockedBatchItem] = []
         for index, result in enumerate(results):
             hook = hooks[index] if hooks is not None else None
@@ -250,10 +285,9 @@ class Firewall:
                 hook=hook,
                 tool_name=tool_name,
                 result=result,
-                shadow_mode=effective_shadow,
             )
             self._fire_on_classify(event)
-            if event.blocked and not event.shadow_mode:
+            if event.blocked and event.mode == "block":
                 blocked.append(
                     BlockedBatchItem(
                         index=index,
@@ -287,12 +321,14 @@ class Firewall:
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
         request_id: str,
+        mode: FirewallMode | None = None,
     ) -> BlockResult:
         return self._classify_single_raw(
             sanitize_text(text),
             hook=hook,
             tool_name=tool_name,
             metadata=_sdk_metadata(metadata, request_id=request_id),
+            mode=mode,
         )
 
     def _classify_single_raw(
@@ -302,8 +338,11 @@ class Firewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
+        mode: FirewallMode | None = None,
     ) -> BlockResult:
         payload: dict[str, Any] = {"text": text}
+        if mode is not None:
+            payload["mode"] = mode
         hook_str = hook_value(hook)
         if hook_str:
             payload["hook"] = hook_str
@@ -312,7 +351,7 @@ class Firewall:
         if metadata is not None:
             payload["metadata"] = dict(metadata)
         data = self._post_json(payload)
-        return _block_result_from_json(data)
+        return _block_result_from_json(data, mode)
 
     def _classify_batch_raw(
         self,
@@ -322,6 +361,7 @@ class Firewall:
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
         request_id: str,
+        mode: FirewallMode | None = None,
     ) -> list[BlockResult]:
         text_list = [sanitize_text(text) for text in texts]
         if not text_list:
@@ -342,6 +382,8 @@ class Firewall:
             )
 
         payload: dict[str, Any] = {"texts": text_list}
+        if mode is not None:
+            payload["mode"] = mode
         if hooks:
             payload["hooks"] = [hook_value(h) for h in hooks]
         if tool_names:
@@ -362,7 +404,7 @@ class Firewall:
                 "Firewall: predictions length "
                 f"{len(predictions)} does not match texts length {len(text_list)}"
             )
-        return [_block_result_from_json(item) for item in predictions]
+        return [_block_result_from_json(item, mode) for item in predictions]
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)
@@ -403,8 +445,17 @@ class Firewall:
         LOG.debug("retrying firewall request in %.2fs after attempt %d", wait, attempt + 1)
         time.sleep(wait)
 
-    def _effective_shadow_mode(self, shadow_mode: bool | None) -> bool:
-        return self.shadow_mode if shadow_mode is None else shadow_mode
+    def _effective_mode(
+        self,
+        mode: FirewallMode | None,
+        shadow_mode: bool | None,
+    ) -> FirewallMode | None:
+        if mode is not None:
+            return _validate_mode(mode)
+        legacy_mode = _legacy_mode(shadow_mode)
+        if legacy_mode is not None:
+            return legacy_mode
+        return self.mode
 
     def _new_classify_event(
         self,
@@ -413,15 +464,16 @@ class Firewall:
         hook: HookLabel | str | None,
         tool_name: str | None,
         result: BlockResult,
-        shadow_mode: bool,
     ) -> ClassifyEvent:
+        effective_mode = result.mode or _LEGACY_RESPONSE_MODE
         return ClassifyEvent(
             hook=normalize_hook_label(hook),
             tool_name=tool_name,
             text=text,
             result=result,
             blocked=result.prediction == "MALICIOUS",
-            shadow_mode=shadow_mode,
+            mode=effective_mode,
+            shadow_mode=effective_mode == "shadow",
         )
 
     def _fire_on_classify(self, event: ClassifyEvent) -> None:

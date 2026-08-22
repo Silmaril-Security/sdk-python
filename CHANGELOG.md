@@ -2,6 +2,21 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.6.0 - 2026-08-22
+
+- Add the existing `shadow | warn | block` request mode contract to single and
+  batch classification, with backend control when mode is omitted.
+- Return and enforce the backend-resolved effective mode on current-backend
+  results.
+- Keep an explicit request mode authoritative when a legacy or mixed-version
+  backend omits or disagrees about `mode`. When both request and response omit
+  mode, leave the result mode unset so integrations can preserve their pre-0.6
+  behavior without increasing enforcement.
+- Retain `shadow_mode` compatibility: `True` requests Shadow, `False` requests
+  Block, and explicit `mode` takes precedence.
+- Make sync and async LangChain handlers enforce only effective Block results;
+  Shadow and Warn preserve the host flow.
+
 ## 0.5.1 - 2026-07-29
 
 - Add typed support for `code_generation`, `story_script_generation`,

@@ -61,6 +61,7 @@ from silmaril_security.sdk.types import (
     BlockResult,
     ClassificationMetadata,
     ClassifyEvent,
+    FirewallMode,
     Prediction,
 )
 
@@ -82,6 +83,7 @@ __all__ = [
     "Firewall",
     "FirewallBlockedException",
     "FirewallHook",
+    "FirewallMode",
     "HARMFUL_OUTCOMES",
     "HarmfulOutcome",
     "HookLabel",

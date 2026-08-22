@@ -2,4 +2,4 @@
 
 """Package version shared by runtime metadata and packaging exports."""
 
-VERSION = "0.5.1"
+VERSION = "0.6.0"
