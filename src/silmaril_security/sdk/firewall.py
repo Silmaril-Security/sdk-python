@@ -42,16 +42,19 @@ DEFAULT_MAX_RETRIES = 5
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _MAX_BACKOFF_SECONDS = 30.0
 _MAX_ERROR_BODY_BYTES = 1 << 16
+_LEGACY_RESPONSE_MODE: FirewallMode = "block"
+
+
+def _validate_mode(value: Any) -> FirewallMode:
+    if value in ("shadow", "warn", "block"):
+        return value
+    raise ValueError("Firewall: backend mode must be shadow, warn, or block")
 
 
 def _normalize_mode(value: Any, fallback: FirewallMode | None = None) -> FirewallMode:
     if value is None:
-        if fallback is not None:
-            return fallback
-        raise ValueError("Firewall: backend mode must be shadow, warn, or block")
-    if value in ("shadow", "warn", "block"):
-        return value
-    raise ValueError("Firewall: backend mode must be shadow, warn, or block")
+        value = fallback if fallback is not None else _LEGACY_RESPONSE_MODE
+    return _validate_mode(value)
 
 
 def _legacy_mode(shadow_mode: bool | None) -> FirewallMode | None:
@@ -194,7 +197,7 @@ class Firewall:
         self.api_key = api_key
         self.api_url = api_url
         self.timeout = timeout
-        self.mode = mode or _legacy_mode(shadow_mode)
+        self.mode = _validate_mode(mode) if mode is not None else _legacy_mode(shadow_mode)
         self.shadow_mode = self.mode == "shadow"
         self.on_classify = on_classify
         self.max_retries = max_retries
@@ -442,7 +445,12 @@ class Firewall:
         mode: FirewallMode | None,
         shadow_mode: bool | None,
     ) -> FirewallMode | None:
-        return mode or _legacy_mode(shadow_mode) or self.mode
+        if mode is not None:
+            return _validate_mode(mode)
+        legacy_mode = _legacy_mode(shadow_mode)
+        if legacy_mode is not None:
+            return legacy_mode
+        return self.mode
 
     def _new_classify_event(
         self,

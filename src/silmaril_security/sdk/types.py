@@ -23,14 +23,14 @@ class BlockResult:
     prediction: Prediction
     score: float
     threshold: float
-    mode: FirewallMode
     primary_outcome: PrimaryOutcome | None = None
     outcome_scores: dict[HarmfulOutcome, float] | None = None
     detector_scores: dict[HarmfulOutcome, float] | None = None
     detector_counts: dict[HarmfulOutcome, int] | None = None
+    mode: FirewallMode = "block"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ClassifyEvent:
     """Classification decision emitted by direct calls and adapters."""
 
@@ -39,8 +39,31 @@ class ClassifyEvent:
     text: str
     result: BlockResult
     blocked: bool
-    mode: FirewallMode
     shadow_mode: bool
+    mode: FirewallMode
+
+    def __init__(
+        self,
+        hook: HookLabel,
+        tool_name: str | None,
+        text: str,
+        result: BlockResult,
+        blocked: bool,
+        shadow_mode: bool,
+        *,
+        mode: FirewallMode | None = None,
+    ) -> None:
+        """Preserve the pre-0.6 positional signature while adding effective mode."""
+        effective_mode = mode or ("shadow" if shadow_mode else result.mode)
+        if effective_mode not in ("shadow", "warn", "block"):
+            raise ValueError("Firewall: mode must be shadow, warn, or block")
+        object.__setattr__(self, "hook", hook)
+        object.__setattr__(self, "tool_name", tool_name)
+        object.__setattr__(self, "text", text)
+        object.__setattr__(self, "result", result)
+        object.__setattr__(self, "blocked", blocked)
+        object.__setattr__(self, "shadow_mode", effective_mode == "shadow")
+        object.__setattr__(self, "mode", effective_mode)
 
 
 @dataclass(frozen=True)

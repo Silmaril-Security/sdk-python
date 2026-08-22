@@ -73,6 +73,28 @@ def test_langchain_handler_fail_open(monkeypatch):
     )
 
 
+def test_langchain_legacy_mode_less_response_still_blocks(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_langchain_handler()
+
+    monkeypatch.setattr(
+        fw,
+        "_post_json",
+        lambda payload: {
+            "prediction": "MALICIOUS",
+            "score": 0.9,
+            "threshold": 0.5,
+        },
+    )
+
+    with pytest.raises(FirewallBlockedException):
+        handler.on_chat_model_start(
+            serialized={},
+            messages=[[{"role": "user", "content": "attack"}]],
+            run_id=uuid4(),
+        )
+
+
 def test_langchain_effective_warn_preserves_flow(monkeypatch):
     events: list[ClassifyEvent] = []
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
@@ -194,6 +216,28 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
         "request_id": "async-req",
     }
     assert "threshold" not in payload
+
+
+@pytest.mark.asyncio
+async def test_async_langchain_legacy_mode_less_response_still_blocks(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_async_langchain_handler()
+
+    async def fake_post_json(client, firewall, payload):
+        return {
+            "prediction": "MALICIOUS",
+            "score": 0.9,
+            "threshold": 0.5,
+        }
+
+    monkeypatch.setattr("silmaril_security.sdk.langchain._async_post_json", fake_post_json)
+
+    with pytest.raises(FirewallBlockedException):
+        await handler.on_chat_model_start(
+            serialized={},
+            messages=[[{"role": "user", "content": "attack"}]],
+            run_id=uuid4(),
+        )
 
 
 @pytest.mark.asyncio

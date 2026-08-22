@@ -13,13 +13,14 @@ from silmaril_security.sdk import (
     BatchFirewallBlockedException,
     BatchPromptBlockedException,
     BlockResult,
+    ClassifyEvent,
     Firewall,
     FirewallBlockedException,
     HookLabel,
     PromptBlockedException,
     SilmarilApiError,
 )
-from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
+from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES, _block_result_from_json
 
 TEST_API_URL = "https://api.test.invalid/classify"
 
@@ -301,6 +302,39 @@ def test_classify_rejects_invalid_backend_mode(monkeypatch):
 
     with pytest.raises(ValueError, match="backend mode must be shadow, warn, or block"):
         fw.classify("payload")
+
+
+def test_legacy_mode_less_response_defaults_to_block():
+    result = _block_result_from_json(
+        {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5}
+    )
+
+    assert result.mode == "block"
+
+
+def test_response_fallback_mode_is_validated():
+    with pytest.raises(ValueError, match="backend mode must be shadow, warn, or block"):
+        _block_result_from_json(
+            {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
+            "audit",  # type: ignore[arg-type]
+        )
+
+
+def test_public_positional_constructors_remain_compatible():
+    result = BlockResult("BENIGN", 0.1, 0.5, OUTCOME_SECRET_EXPOSURE)
+    event = ClassifyEvent(
+        HookLabel.USER_INPUT,
+        None,
+        "hello",
+        result,
+        False,
+        True,
+    )
+
+    assert result.primary_outcome == OUTCOME_SECRET_EXPOSURE
+    assert result.mode == "block"
+    assert event.mode == "shadow"
+    assert event.shadow_mode is True
 
 
 def test_classify_batch_wire_shape_and_block_error(monkeypatch):

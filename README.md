@@ -228,6 +228,10 @@ raises `FirewallBlockedException` or `BatchFirewallBlockedException` for a
 malicious decision. Every result and event includes the backend-returned
 effective mode:
 
+During a rolling upgrade, a successful response from a pre-0.6 backend that
+omits `mode` retains the legacy SDK behavior and is treated as Block. Current
+backends return the effective mode, including backend-controlled Shadow or Warn.
+
 ```python
 import logging
 import os
