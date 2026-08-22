@@ -27,7 +27,8 @@ class BlockResult:
     outcome_scores: dict[HarmfulOutcome, float] | None = None
     detector_scores: dict[HarmfulOutcome, float] | None = None
     detector_counts: dict[HarmfulOutcome, int] | None = None
-    mode: FirewallMode = "block"
+    # None only when a legacy backend omitted mode and no override was requested.
+    mode: FirewallMode | None = None
 
 
 @dataclass(frozen=True, init=False)
@@ -54,7 +55,7 @@ class ClassifyEvent:
         mode: FirewallMode | None = None,
     ) -> None:
         """Preserve the pre-0.6 positional signature while adding effective mode."""
-        effective_mode = mode or ("shadow" if shadow_mode else result.mode)
+        effective_mode = mode or ("shadow" if shadow_mode else result.mode or "block")
         if effective_mode not in ("shadow", "warn", "block"):
             raise ValueError("Firewall: mode must be shadow, warn, or block")
         object.__setattr__(self, "hook", hook)

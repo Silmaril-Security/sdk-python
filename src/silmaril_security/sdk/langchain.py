@@ -114,17 +114,18 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             return
 
         blocked = result.prediction == "MALICIOUS"
+        effective_mode = self.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,
             tool_name=tool_name,
             text=text,
             result=result,
             blocked=blocked,
-            mode=result.mode,
-            shadow_mode=result.mode == "shadow",
+            mode=effective_mode,
+            shadow_mode=effective_mode == "shadow",
         )
         self._fire_on_classify(event)
-        if blocked and result.mode == "block":
+        if blocked and effective_mode == "block":
             raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
@@ -320,17 +321,18 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             return
 
         blocked = result.prediction == "MALICIOUS"
+        effective_mode = self._sync_handler.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,
             tool_name=tool_name,
             text=text,
             result=result,
             blocked=blocked,
-            mode=result.mode,
-            shadow_mode=result.mode == "shadow",
+            mode=effective_mode,
+            shadow_mode=effective_mode == "shadow",
         )
         await self._fire_on_classify(event)
-        if blocked and result.mode == "block":
+        if blocked and effective_mode == "block":
             raise FirewallBlockedException(
                 score=result.score,
                 threshold=result.threshold,
@@ -485,7 +487,7 @@ async def _async_classify_raw(
             request_id=request_id_value,
         )
         data = await _async_post_json(client, firewall, payload)
-        return _block_result_from_json(data)
+        return _block_result_from_json(data, mode)
 
 
 async def _async_post_json(client: Any, firewall: Firewall, payload: dict[str, Any]) -> dict[str, Any]:

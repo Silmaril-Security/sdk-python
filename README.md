@@ -139,7 +139,9 @@ Firewall(
 `classify()` and `classify_batch()` return the server's prediction, score,
 backend threshold, and effective mode. When mode is omitted, the backend
 controls it. A malicious result raises a typed blocking exception only when the
-effective mode is `"block"`.
+effective mode is `"block"`. A legacy mode-less response leaves
+`BlockResult.mode` as `None` when no override was requested; direct SDK calls
+retain their pre-0.6 Block default internally.
 
 When a custom `requests.Session` is provided, the SDK preserves it and adds the
 required `x-api-key` and `content-type` headers.
@@ -225,12 +227,14 @@ applied threshold, which remains available on
 Use `"shadow"`, `"warn"`, or `"block"` only when a request needs to override
 the backend-configured mode. Shadow and Warn preserve the caller flow; Block
 raises `FirewallBlockedException` or `BatchFirewallBlockedException` for a
-malicious decision. Every result and event includes the backend-returned
-effective mode:
+malicious decision. Current backends return the effective mode on every result
+and event.
 
-During a rolling upgrade, a successful response from a pre-0.6 backend that
-omits `mode` retains the legacy SDK behavior and is treated as Block. Current
-backends return the effective mode, including backend-controlled Shadow or Warn.
+During a rolling upgrade, an explicit request mode remains authoritative if a
+legacy or mixed-version backend omits or disagrees about `mode`. When both the
+request and response omit it, `BlockResult.mode` remains `None`; integrations
+can retain their pre-0.6 behavior without falsely reporting a backend Block
+mode. Direct SDK enforcement retains its pre-0.6 Block default.
 
 ```python
 import logging

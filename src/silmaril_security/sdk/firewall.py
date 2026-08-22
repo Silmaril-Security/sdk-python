@@ -51,10 +51,15 @@ def _validate_mode(value: Any) -> FirewallMode:
     raise ValueError("Firewall: backend mode must be shadow, warn, or block")
 
 
-def _normalize_mode(value: Any) -> FirewallMode:
-    if value is None:
-        value = _LEGACY_RESPONSE_MODE
-    return _validate_mode(value)
+def _normalize_mode(
+    value: Any,
+    requested_mode: FirewallMode | None = None,
+) -> FirewallMode | None:
+    response_mode = _validate_mode(value) if value is not None else None
+    # A supplied mode is the per-request override contract. Prefer it during
+    # rolling upgrades so a missing or stale response field cannot strengthen
+    # enforcement beyond what the caller requested.
+    return requested_mode or response_mode
 
 
 def _legacy_mode(shadow_mode: bool | None) -> FirewallMode | None:
@@ -63,7 +68,10 @@ def _legacy_mode(shadow_mode: bool | None) -> FirewallMode | None:
     return "shadow" if shadow_mode else "block"
 
 
-def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
+def _block_result_from_json(
+    data: dict[str, Any],
+    requested_mode: FirewallMode | None = None,
+) -> BlockResult:
     score = float(data["score"])
     threshold = float(data["threshold"])
     prediction = data.get("prediction")
@@ -78,7 +86,7 @@ def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
         prediction=prediction,
         score=score,
         threshold=threshold,
-        mode=_normalize_mode(data.get("mode")),
+        mode=_normalize_mode(data.get("mode"), requested_mode),
         primary_outcome=(
             normalize_primary_outcome(primary_raw) if primary_raw is not None else None
         ),
@@ -343,7 +351,7 @@ class Firewall:
         if metadata is not None:
             payload["metadata"] = dict(metadata)
         data = self._post_json(payload)
-        return _block_result_from_json(data)
+        return _block_result_from_json(data, mode)
 
     def _classify_batch_raw(
         self,
@@ -396,7 +404,7 @@ class Firewall:
                 "Firewall: predictions length "
                 f"{len(predictions)} does not match texts length {len(text_list)}"
             )
-        return [_block_result_from_json(item) for item in predictions]
+        return [_block_result_from_json(item, mode) for item in predictions]
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)
@@ -457,14 +465,15 @@ class Firewall:
         tool_name: str | None,
         result: BlockResult,
     ) -> ClassifyEvent:
+        effective_mode = result.mode or _LEGACY_RESPONSE_MODE
         return ClassifyEvent(
             hook=normalize_hook_label(hook),
             tool_name=tool_name,
             text=text,
             result=result,
             blocked=result.prediction == "MALICIOUS",
-            mode=result.mode,
-            shadow_mode=result.mode == "shadow",
+            mode=effective_mode,
+            shadow_mode=effective_mode == "shadow",
         )
 
     def _fire_on_classify(self, event: ClassifyEvent) -> None:

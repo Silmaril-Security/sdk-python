@@ -278,9 +278,32 @@ def test_explicit_mode_precedes_legacy_shadow_mode(monkeypatch):
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    result = fw.classify("attack", mode="block", shadow_mode=True, request_id="req-mode")
+    with pytest.raises(FirewallBlockedException) as exc_info:
+        fw.classify("attack", mode="block", shadow_mode=True, request_id="req-mode")
 
     assert json.loads(calls[0]["data"])["mode"] == "block"
+    assert exc_info.value.result.mode == "block"
+
+
+def test_explicit_shadow_cannot_be_escalated_by_mixed_backend_response(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="shadow")
+
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "mode": "block",
+            },
+        ),
+    )
+
+    result = fw.classify("attack")
+
     assert result.mode == "shadow"
 
 
@@ -304,15 +327,15 @@ def test_classify_rejects_invalid_backend_mode(monkeypatch):
         fw.classify("payload")
 
 
-def test_legacy_mode_less_response_defaults_to_block():
+def test_backend_controlled_mode_less_response_preserves_absence():
     result = _block_result_from_json(
         {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5}
     )
 
-    assert result.mode == "block"
+    assert result.mode is None
 
 
-def test_requested_warn_does_not_override_legacy_mode_less_response(monkeypatch):
+def test_requested_warn_is_preserved_when_legacy_backend_omits_mode(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="warn")
 
     monkeypatch.setattr(
@@ -325,10 +348,26 @@ def test_requested_warn_does_not_override_legacy_mode_less_response(monkeypatch)
         },
     )
 
-    with pytest.raises(FirewallBlockedException) as exc_info:
-        fw.classify("attack")
+    result = fw.classify("attack")
 
-    assert exc_info.value.result.mode == "block"
+    assert result.mode == "warn"
+
+
+def test_legacy_shadow_mode_is_preserved_when_backend_omits_mode(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
+            {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5},
+        ),
+    )
+
+    result = fw.classify("attack")
+
+    assert result.mode == "shadow"
 
 
 def test_public_positional_constructors_remain_compatible():
@@ -343,13 +382,13 @@ def test_public_positional_constructors_remain_compatible():
     )
 
     assert result.primary_outcome == OUTCOME_SECRET_EXPOSURE
-    assert result.mode == "block"
+    assert result.mode is None
     assert event.mode == "shadow"
     assert event.shadow_mode is True
 
 
 def test_classify_batch_wire_shape_and_block_error(monkeypatch):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="warn")
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
     calls: list[dict[str, Any]] = []
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
@@ -379,8 +418,8 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     assert exc_info.value.blocked[0].tool_name == "chat"
     body = json.loads(calls[0]["data"])
     assert body["texts"] == ["first", "second", "third"]
-    assert body["mode"] == "warn"
-    assert all(result.mode == "block" for result in exc_info.value.results)
+    assert "mode" not in body
+    assert all(result.mode is None for result in exc_info.value.results)
     assert "threshold" not in body
     assert body["hooks"] == ["user_input", "tool_response", "tool_response"]
     assert body["tool_names"] == ["chat", "read_file", None]
