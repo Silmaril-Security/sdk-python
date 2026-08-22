@@ -312,12 +312,23 @@ def test_legacy_mode_less_response_defaults_to_block():
     assert result.mode == "block"
 
 
-def test_response_fallback_mode_is_validated():
-    with pytest.raises(ValueError, match="backend mode must be shadow, warn, or block"):
-        _block_result_from_json(
-            {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
-            "audit",  # type: ignore[arg-type]
-        )
+def test_requested_warn_does_not_override_legacy_mode_less_response(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="warn")
+
+    monkeypatch.setattr(
+        fw,
+        "_post_json",
+        lambda payload: {
+            "prediction": "MALICIOUS",
+            "score": 0.9,
+            "threshold": 0.5,
+        },
+    )
+
+    with pytest.raises(FirewallBlockedException) as exc_info:
+        fw.classify("attack")
+
+    assert exc_info.value.result.mode == "block"
 
 
 def test_public_positional_constructors_remain_compatible():
@@ -338,7 +349,7 @@ def test_public_positional_constructors_remain_compatible():
 
 
 def test_classify_batch_wire_shape_and_block_error(monkeypatch):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="warn")
     calls: list[dict[str, Any]] = []
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
@@ -368,6 +379,8 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     assert exc_info.value.blocked[0].tool_name == "chat"
     body = json.loads(calls[0]["data"])
     assert body["texts"] == ["first", "second", "third"]
+    assert body["mode"] == "warn"
+    assert all(result.mode == "block" for result in exc_info.value.results)
     assert "threshold" not in body
     assert body["hooks"] == ["user_input", "tool_response", "tool_response"]
     assert body["tool_names"] == ["chat", "read_file", None]

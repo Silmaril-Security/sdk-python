@@ -74,7 +74,11 @@ def test_langchain_handler_fail_open(monkeypatch):
 
 
 def test_langchain_legacy_mode_less_response_still_blocks(monkeypatch):
-    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    fw = Firewall(
+        api_key="sk",
+        api_url="https://api.test.invalid/classify",
+        mode="warn",
+    )
     handler = fw.as_langchain_handler()
 
     monkeypatch.setattr(
@@ -220,7 +224,11 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_async_langchain_legacy_mode_less_response_still_blocks(monkeypatch):
-    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    fw = Firewall(
+        api_key="sk",
+        api_url="https://api.test.invalid/classify",
+        mode="warn",
+    )
     handler = fw.as_async_langchain_handler()
 
     async def fake_post_json(client, firewall, payload):

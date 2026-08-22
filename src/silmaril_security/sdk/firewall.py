@@ -51,9 +51,9 @@ def _validate_mode(value: Any) -> FirewallMode:
     raise ValueError("Firewall: backend mode must be shadow, warn, or block")
 
 
-def _normalize_mode(value: Any, fallback: FirewallMode | None = None) -> FirewallMode:
+def _normalize_mode(value: Any) -> FirewallMode:
     if value is None:
-        value = fallback if fallback is not None else _LEGACY_RESPONSE_MODE
+        value = _LEGACY_RESPONSE_MODE
     return _validate_mode(value)
 
 
@@ -63,10 +63,7 @@ def _legacy_mode(shadow_mode: bool | None) -> FirewallMode | None:
     return "shadow" if shadow_mode else "block"
 
 
-def _block_result_from_json(
-    data: dict[str, Any],
-    fallback_mode: FirewallMode | None = None,
-) -> BlockResult:
+def _block_result_from_json(data: dict[str, Any]) -> BlockResult:
     score = float(data["score"])
     threshold = float(data["threshold"])
     prediction = data.get("prediction")
@@ -81,7 +78,7 @@ def _block_result_from_json(
         prediction=prediction,
         score=score,
         threshold=threshold,
-        mode=_normalize_mode(data.get("mode"), fallback_mode),
+        mode=_normalize_mode(data.get("mode")),
         primary_outcome=(
             normalize_primary_outcome(primary_raw) if primary_raw is not None else None
         ),
@@ -346,7 +343,7 @@ class Firewall:
         if metadata is not None:
             payload["metadata"] = dict(metadata)
         data = self._post_json(payload)
-        return _block_result_from_json(data, mode)
+        return _block_result_from_json(data)
 
     def _classify_batch_raw(
         self,
@@ -399,7 +396,7 @@ class Firewall:
                 "Firewall: predictions length "
                 f"{len(predictions)} does not match texts length {len(text_list)}"
             )
-        return [_block_result_from_json(item, mode) for item in predictions]
+        return [_block_result_from_json(item) for item in predictions]
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)

@@ -489,7 +489,7 @@ async def _async_classify_raw(
             request_id=request_id_value,
         )
         data = await _async_post_json(client, firewall, payload)
-        return _block_result_from_json(data, mode)
+        return _block_result_from_json(data)
 
 
 async def _async_post_json(client: Any, firewall: Firewall, payload: dict[str, Any]) -> dict[str, Any]:
