@@ -20,6 +20,15 @@ from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
 pytest.importorskip("langchain_core.callbacks")
 
 
+def test_langchain_handlers_reject_invalid_mode_before_classification():
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+
+    with pytest.raises(ValueError, match="mode must be shadow, warn, or block"):
+        fw.as_langchain_handler(mode="audit")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="mode must be shadow, warn, or block"):
+        fw.as_async_langchain_handler(mode="audit")  # type: ignore[arg-type]
+
+
 def test_langchain_handler_blocks_last_user_message(monkeypatch):
     events: list[ClassifyEvent] = []
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")

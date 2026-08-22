@@ -76,11 +76,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         self.include_system = include_system
         self.include_tool = include_tool
         self.fail_open = fail_open
-        self.mode = mode or (
-            ("shadow" if shadow_mode else "block")
-            if shadow_mode is not None
-            else firewall.mode
-        )
+        self.mode = firewall._effective_mode(mode, shadow_mode)
         self.shadow_mode = self.mode == "shadow"
         self.on_classify = on_classify
         self.logger = logger or LOG
