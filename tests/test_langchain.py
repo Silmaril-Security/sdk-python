@@ -110,7 +110,7 @@ def test_langchain_requested_warn_survives_legacy_mode_less_response(monkeypatch
 def test_langchain_effective_warn_preserves_flow(monkeypatch):
     events: list[ClassifyEvent] = []
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
-    handler = fw.as_langchain_handler(mode="block", on_classify=events.append)
+    handler = fw.as_langchain_handler(on_classify=events.append)
 
     def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
         return BlockResult(

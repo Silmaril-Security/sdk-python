@@ -33,11 +33,13 @@ class FakeResponse:
         *,
         reason: str | None = None,
         headers: dict[str, str] | None = None,
+        include_default_mode: bool = True,
     ) -> None:
         self.status_code = status_code
         self._body = body
         self.reason = reason or f"status-{status_code}"
         self.headers = headers or {}
+        self.include_default_mode = include_default_mode
 
     @property
     def text(self) -> str:
@@ -45,6 +47,8 @@ class FakeResponse:
 
     def json(self) -> dict[str, Any]:
         assert isinstance(self._body, dict)
+        if not self.include_default_mode:
+            return self._body
         if isinstance(self._body.get("prediction"), str):
             return {"mode": "block", **self._body}
         predictions = self._body.get("predictions")
@@ -402,6 +406,7 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
                     {"prediction": "MALICIOUS", "score": 0.8, "threshold": 0.5},
                 ]
             },
+            include_default_mode=False,
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
