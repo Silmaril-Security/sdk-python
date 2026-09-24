@@ -149,9 +149,18 @@ async with AsyncFirewall(
 
 One `AsyncFirewall` can be shared safely by concurrent tasks on one event loop.
 It binds to the first running loop that uses it and rejects use from another
-loop or after `aclose()`. The context manager closes an SDK-owned pool.
-If `http_client=` supplies an `httpx.AsyncClient`, the caller retains ownership
-and must close it. `aclose()` is idempotent.
+loop or after `aclose()`.
+
+`aclose()` shuts down gracefully: new classifications are rejected immediately,
+requests that are already sending or waiting to retry are allowed to finish, and
+only then is an SDK-owned pool closed. Exiting the `async with` block calls it
+for you, repeated calls are idempotent, and concurrent callers all return once
+the pool is actually closed. If `http_client=` supplies an `httpx.AsyncClient`,
+the caller retains ownership and must close it.
+
+Closing from inside your own in-flight classification raises `RuntimeError`
+instead of tearing the pool out from under that request. An `on_classify`
+callback runs after its request finishes, so closing from a callback works.
 
 For synchronous off-thread work, create one `Firewall` per worker thread.
 Neither client promises sharing across threads or event loops.

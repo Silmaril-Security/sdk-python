@@ -46,6 +46,32 @@ if TYPE_CHECKING:
 LOG = logging.getLogger("silmaril_security.sdk")
 
 
+async def _aread_capped_error_body(
+    response: Any,
+    transport_error: type[BaseException],
+    limit: int = _MAX_ERROR_BODY_BYTES,
+) -> str:
+    """Read at most ``limit`` bytes of a streamed error body."""
+    chunks: list[bytes] = []
+    remaining = limit
+    try:
+        async for chunk in response.aiter_bytes():
+            if not chunk:
+                continue
+            if len(chunk) >= remaining:
+                chunks.append(chunk[:remaining])
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except transport_error:
+        # A stream that breaks before the cap is a transport failure, so it
+        # follows the retry policy instead of reporting a partial error body.
+        raise
+    except Exception:
+        LOG.debug("failed to read firewall error body", exc_info=True)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 class AsyncFirewall:
     """Async client for the Silmaril Firewall /classify endpoint."""
 
@@ -93,7 +119,13 @@ class AsyncFirewall:
         self._client = http_client
         self._owns_client = http_client is None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._closing = False
         self._closed = False
+        self._active_requests = 0
+        self._request_tasks: set[asyncio.Task[Any]] = set()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._close_lock = asyncio.Lock()
 
     async def __aenter__(self) -> AsyncFirewall:
         self._ensure_client()
@@ -103,14 +135,37 @@ class AsyncFirewall:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """Close an SDK-owned client. Caller-injected clients remain caller-owned."""
+        """Stop accepting work, drain active requests, then close an SDK-owned client.
+
+        New classifications are rejected as soon as shutdown starts, while requests
+        that are already sending or waiting to retry run to completion. Close is
+        idempotent, every caller returns only once an SDK-owned client is actually
+        closed, and a caller-injected client stays caller-owned.
+
+        Closing from inside one's own in-flight request raises ``RuntimeError``
+        without starting shutdown, because draining would deadlock on the calling
+        task and closing early would break that task's own request. An
+        ``on_classify`` callback runs after its request completes, so closing from
+        a callback is supported.
+        """
         if self._closed:
             return
         if self._loop is not None and asyncio.get_running_loop() is not self._loop:
             raise RuntimeError("AsyncFirewall cannot be used from a different event loop")
-        self._closed = True
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
+        if asyncio.current_task() in self._request_tasks:
+            raise RuntimeError(
+                "AsyncFirewall.aclose() cannot be called from inside an active "
+                "classification on the same task; close it after the call returns"
+            )
+        self._closing = True
+        if self._active_requests:
+            await self._idle.wait()
+        async with self._close_lock:
+            if self._closed:
+                return
+            if self._owns_client and self._client is not None:
+                await self._client.aclose()
+            self._closed = True
 
     async def classify(
         self,
@@ -161,20 +216,25 @@ class AsyncFirewall:
         """Classify independent texts in one async request."""
         request_id_value = request_id or str(uuid4())
         requested_mode = self._effective_mode(mode, shadow_mode)
+        # Results must describe the request that was sent, so the inputs are
+        # snapshotted before the caller can mutate them during the await.
+        sent_texts = list(texts)
+        sent_hooks = list(hooks) if hooks is not None else None
+        sent_tool_names = list(tool_names) if tool_names is not None else None
         results = await self._classify_batch_raw(
-            texts,
-            hooks=hooks,
-            tool_names=tool_names,
+            sent_texts,
+            hooks=sent_hooks,
+            tool_names=sent_tool_names,
             metadata=metadata,
             request_id=request_id_value,
             mode=requested_mode,
         )
         blocked: list[BlockedBatchItem] = []
         for index, result in enumerate(results):
-            hook = hooks[index] if hooks is not None else None
-            tool_name = tool_names[index] if tool_names is not None else None
+            hook = sent_hooks[index] if sent_hooks is not None else None
+            tool_name = sent_tool_names[index] if sent_tool_names is not None else None
             event = _new_classify_event(
-                text=texts[index],
+                text=sent_texts[index],
                 hook=hook,
                 tool_name=tool_name,
                 result=result,
@@ -184,7 +244,7 @@ class AsyncFirewall:
                 blocked.append(
                     BlockedBatchItem(
                         index=index,
-                        text=texts[index],
+                        text=sent_texts[index],
                         hook=event.hook,
                         tool_name=tool_name,
                         result=result,
@@ -244,46 +304,82 @@ class AsyncFirewall:
     async def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         client = self._ensure_client()
         headers = {"x-api-key": self.api_key, "content-type": "application/json"}
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = await client.post(
+        self._begin_request()
+        try:
+            for attempt in range(self.max_retries + 1):
+                request = client.build_request(
+                    "POST",
                     self.api_url,
                     json=payload,
                     headers=headers,
                     timeout=self.timeout,
-                    follow_redirects=False,
                 )
-            except self._httpx.HTTPError:
-                if attempt < self.max_retries:
-                    await self._sleep_before_retry(attempt, None)
-                    continue
-                raise
-
-            if response.status_code in _RETRYABLE_STATUS_CODES and attempt < self.max_retries:
-                retry_after = response.headers.get("Retry-After")
-                await response.aclose()
-                await self._sleep_before_retry(attempt, retry_after)
-                continue
-            if response.status_code >= 300:
+                retry_after: str | None = None
+                should_retry = False
+                # Sending and streaming the body share one retry scope, so a
+                # transport failure mid-download is retried like a failed send.
                 try:
-                    content = getattr(response, "content", None)
-                    if content is None:
-                        content = str(response.text).encode()
-                    body = content[:_MAX_ERROR_BODY_BYTES].decode("utf-8", errors="replace")
-                except Exception:
-                    body = ""
-                await response.aclose()
-                raise SilmarilApiError(
-                    status=response.status_code,
-                    status_text=response.reason_phrase,
-                    body=body,
-                )
-            return response.json()
-        raise RuntimeError("Firewall: exhausted retries")
+                    response = await client.send(
+                        request,
+                        stream=True,
+                        follow_redirects=False,
+                    )
+                    try:
+                        if (
+                            response.status_code in _RETRYABLE_STATUS_CODES
+                            and attempt < self.max_retries
+                        ):
+                            retry_after = response.headers.get("Retry-After")
+                            should_retry = True
+                        elif response.status_code >= 300:
+                            # Read the error body as a capped stream so an oversized
+                            # response is never buffered in full just to be truncated.
+                            body = await _aread_capped_error_body(
+                                response, self._httpx.HTTPError
+                            )
+                            raise SilmarilApiError(
+                                status=response.status_code,
+                                status_text=response.reason_phrase,
+                                body=body,
+                            )
+                        else:
+                            await response.aread()
+                    finally:
+                        await response.aclose()
+                except self._httpx.HTTPError:
+                    if attempt < self.max_retries:
+                        await self._sleep_before_retry(attempt, None)
+                        continue
+                    raise
+
+                if should_retry:
+                    await self._sleep_before_retry(attempt, retry_after)
+                    continue
+                return response.json()
+            raise RuntimeError("Firewall: exhausted retries")
+        finally:
+            self._end_request()
+
+    def _begin_request(self) -> None:
+        self._active_requests += 1
+        self._idle.clear()
+        task = asyncio.current_task()
+        if task is not None:
+            self._request_tasks.add(task)
+
+    def _end_request(self) -> None:
+        self._active_requests -= 1
+        task = asyncio.current_task()
+        if task is not None:
+            self._request_tasks.discard(task)
+        if self._active_requests == 0:
+            self._idle.set()
 
     def _ensure_client(self) -> Any:
         if self._closed:
             raise RuntimeError("AsyncFirewall is closed")
+        if self._closing:
+            raise RuntimeError("AsyncFirewall is closing")
         loop = asyncio.get_running_loop()
         if self._loop is None:
             self._loop = loop

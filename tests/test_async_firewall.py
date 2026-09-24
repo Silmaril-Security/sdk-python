@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -66,7 +67,7 @@ async def test_concurrent_classify_calls_overlap_and_keep_state_independent():
 
     async def handle(request: httpx.Request) -> httpx.Response:
         nonlocal active, max_active
-        payload = __import__("json").loads(request.content)
+        payload = json.loads(request.content)
         requests.append(payload)
         active += 1
         max_active = max(max_active, active)
@@ -123,7 +124,7 @@ async def test_batch_is_one_ordered_request_and_preserves_block_details():
     payloads: list[dict[str, Any]] = []
 
     async def handle(request: httpx.Request) -> httpx.Response:
-        payloads.append(__import__("json").loads(request.content))
+        payloads.append(json.loads(request.content))
         return httpx.Response(
             200,
             request=request,
@@ -182,7 +183,7 @@ async def test_cancellation_stops_request_and_retry_sleep_while_siblings_succeed
     request_cancelled = asyncio.Event()
 
     async def handle(request: httpx.Request) -> httpx.Response:
-        payload = __import__("json").loads(request.content)
+        payload = json.loads(request.content)
         if payload["text"] == "in-flight":
             request_started.set()
             try:
@@ -230,20 +231,30 @@ async def test_owned_client_is_reused_closed_once_and_rejects_closed_use(monkeyp
     class TrackingClient:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
-            self.posts = 0
+            self.sends = 0
             self.close_calls = 0
-            self.is_closed = False
+            self.inner = real_async_client(
+                transport=httpx.MockTransport(lambda request: response(request)),
+                **kwargs,
+            )
             instances.append(self)
 
-        async def post(self, url: str, **kwargs: Any) -> httpx.Response:
-            self.posts += 1
-            request = httpx.Request("POST", url)
-            return response(request)
+        @property
+        def is_closed(self) -> bool:
+            return bool(self.inner.is_closed)
+
+        def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+            return self.inner.build_request(*args, **kwargs)
+
+        async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            self.sends += 1
+            return await self.inner.send(request, **kwargs)
 
         async def aclose(self) -> None:
             self.close_calls += 1
-            self.is_closed = True
+            await self.inner.aclose()
 
+    real_async_client = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", TrackingClient)
     fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL)
     async with fw:
@@ -252,8 +263,9 @@ async def test_owned_client_is_reused_closed_once_and_rejects_closed_use(monkeyp
 
     await fw.aclose()
     assert len(instances) == 1
-    assert instances[0].posts == 2
+    assert instances[0].sends == 2
     assert instances[0].close_calls == 1
+    assert instances[0].is_closed is True
     with pytest.raises(RuntimeError, match="closed"):
         await fw.classify("three")
 
@@ -366,13 +378,13 @@ async def test_post_json_rejects_redirects():
         return httpx.Response(302, request=request, text="redirect")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        original_post = client.post
+        original_send = client.send
 
-        async def tracking_post(url: str, **kwargs: Any) -> httpx.Response:
-            calls.append({"url": url, **kwargs})
-            return await original_post(url, **kwargs)
+        async def tracking_send(request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            calls.append({"url": str(request.url), **kwargs})
+            return await original_send(request, **kwargs)
 
-        client.post = tracking_post  # type: ignore[method-assign]
+        client.send = tracking_send  # type: ignore[method-assign]
         fw = AsyncFirewall(
             api_key="sk",
             api_url=TEST_API_URL,
@@ -407,3 +419,357 @@ async def test_post_json_caps_error_body_and_redacts_message():
 
     assert exc_info.value.body == body[:_MAX_ERROR_BODY_BYTES]
     assert body[:128] not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_error_body_read_stops_at_cap_instead_of_downloading_whole_response():
+    chunk = b"x" * 8192
+    total_chunks = (_MAX_ERROR_BODY_BYTES // len(chunk)) * 4
+    produced = 0
+
+    async def oversized_body() -> Any:
+        nonlocal produced
+        for _ in range(total_chunks):
+            produced += len(chunk)
+            yield chunk
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, request=request, content=oversized_body())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            max_retries=0,
+        )
+        with pytest.raises(SilmarilApiError) as exc_info:
+            await fw._post_json({"text": "hello"})
+
+    assert exc_info.value.body == "x" * _MAX_ERROR_BODY_BYTES
+    assert produced <= _MAX_ERROR_BODY_BYTES + len(chunk)
+    assert produced < total_chunks * len(chunk)
+
+
+@pytest.mark.asyncio
+async def test_aclose_drains_active_retry_and_rejects_new_work(monkeypatch):
+    attempts: list[str] = []
+    sibling_started = asyncio.Event()
+    sibling_release = asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        text = json.loads(request.content)["text"]
+        attempts.append(text)
+        if text == "sibling":
+            sibling_started.set()
+            await sibling_release.wait()
+            return response(request)
+        if text == "retrying" and attempts.count("retrying") == 1:
+            return response(request, status=503)
+        return response(request)
+
+    real_async_client = httpx.AsyncClient
+
+    def make_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", make_client)
+    fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, max_retries=1)
+
+    sleeping = asyncio.Event()
+    sleep_release = asyncio.Event()
+
+    async def held_sleep(attempt: int, retry_after: str | None) -> None:
+        sleeping.set()
+        await sleep_release.wait()
+
+    monkeypatch.setattr(fw, "_sleep_before_retry", held_sleep)
+
+    retrying = asyncio.create_task(fw.classify("retrying"))
+    await asyncio.wait_for(sleeping.wait(), timeout=1)
+    sibling = asyncio.create_task(fw.classify("sibling"))
+    await asyncio.wait_for(sibling_started.wait(), timeout=1)
+
+    closing = asyncio.create_task(fw.aclose())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert closing.done() is False
+    assert fw._client.is_closed is False
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await fw.classify("rejected")
+
+    sleep_release.set()
+    sibling_release.set()
+    assert (await retrying).prediction == "BENIGN"
+    assert (await sibling).prediction == "BENIGN"
+    await asyncio.wait_for(closing, timeout=1)
+
+    assert attempts == ["retrying", "sibling", "retrying"]
+    assert fw._client.is_closed is True
+    await fw.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_from_classify_callback_does_not_deadlock(monkeypatch):
+    real_async_client = httpx.AsyncClient
+
+    def make_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(
+            transport=httpx.MockTransport(lambda request: response(request)),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", make_client)
+    closed_from_callback: list[bool] = []
+
+    async def on_classify(event: ClassifyEvent) -> None:
+        await fw.aclose()
+        closed_from_callback.append(True)
+
+    fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, on_classify=on_classify)
+
+    result = await asyncio.wait_for(fw.classify("hello"), timeout=1)
+
+    assert result.prediction == "BENIGN"
+    assert closed_from_callback == [True]
+    assert fw._client.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_aclose_inside_active_request_raises_and_leaves_owned_pool_open(monkeypatch):
+    attempts: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        attempts.append(json.loads(request.content)["text"])
+        if len(attempts) == 1:
+            return response(request, status=503)
+        return response(request)
+
+    real_async_client = httpx.AsyncClient
+
+    def make_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", make_client)
+    fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, max_retries=1)
+    close_errors: list[str] = []
+
+    async def close_during_retry(attempt: int, retry_after: str | None) -> None:
+        with pytest.raises(RuntimeError, match="active classification") as exc_info:
+            await fw.aclose()
+        close_errors.append(str(exc_info.value))
+
+    monkeypatch.setattr(fw, "_sleep_before_retry", close_during_retry)
+
+    result = await asyncio.wait_for(fw.classify("retry then succeed"), timeout=1)
+
+    assert result.prediction == "BENIGN"
+    assert attempts == ["retry then succeed", "retry then succeed"]
+    assert len(close_errors) == 1
+    assert fw._closing is False
+    assert fw._client.is_closed is False
+
+    await fw.aclose()
+
+    assert fw._client.is_closed is True
+    with pytest.raises(RuntimeError, match="closed"):
+        await fw.classify("after close")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_aclose_callers_wait_for_owned_client_close(monkeypatch):
+    close_started = asyncio.Event()
+    close_release = asyncio.Event()
+    close_calls = 0
+    real_async_client = httpx.AsyncClient
+
+    class SlowClosingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.inner = real_async_client(
+                transport=httpx.MockTransport(lambda request: response(request)),
+                **kwargs,
+            )
+
+        @property
+        def is_closed(self) -> bool:
+            return bool(self.inner.is_closed)
+
+        def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+            return self.inner.build_request(*args, **kwargs)
+
+        async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            return await self.inner.send(request, **kwargs)
+
+        async def aclose(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            close_started.set()
+            await close_release.wait()
+            await self.inner.aclose()
+
+    monkeypatch.setattr(httpx, "AsyncClient", SlowClosingClient)
+    fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL)
+    await fw.classify("warm the pool")
+
+    first = asyncio.create_task(fw.aclose())
+    second = asyncio.create_task(fw.aclose())
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert first.done() is False
+    assert second.done() is False
+
+    close_release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
+
+    assert close_calls == 1
+    assert fw._client.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_body_read_error_is_retried_and_then_succeeds(monkeypatch):
+    attempts = 0
+    sleeps: list[tuple[int, str | None]] = []
+
+    async def failing_body() -> Any:
+        raise httpx.ReadError("stream broke")
+        yield b""  # pragma: no cover - unreachable, keeps this an async generator
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(200, request=request, content=failing_body())
+        return response(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            max_retries=1,
+        )
+
+        async def record_sleep(attempt: int, retry_after: str | None) -> None:
+            sleeps.append((attempt, retry_after))
+
+        monkeypatch.setattr(fw, "_sleep_before_retry", record_sleep)
+
+        result = await asyncio.wait_for(fw.classify("body read fails once"), timeout=1)
+
+    assert attempts == 2
+    assert sleeps == [(0, None)]
+    assert result.prediction == "BENIGN"
+    assert result.score == 0.1
+
+
+@pytest.mark.asyncio
+async def test_error_body_read_failure_follows_transport_retry_policy(monkeypatch):
+    attempts = 0
+
+    async def failing_error_body() -> Any:
+        yield b"partial"
+        raise httpx.ReadError("stream broke")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(403, request=request, content=failing_error_body())
+        return response(request)
+
+    async def no_sleep(attempt: int, retry_after: str | None) -> None:
+        return None
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        retrying = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            max_retries=1,
+        )
+        monkeypatch.setattr(retrying, "_sleep_before_retry", no_sleep)
+
+        result = await asyncio.wait_for(retrying.classify("error body fails once"), timeout=1)
+
+        assert attempts == 2
+        assert result.prediction == "BENIGN"
+
+        attempts = 0
+        exhausted = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            max_retries=0,
+        )
+        with pytest.raises(httpx.ReadError):
+            await exhausted.classify("error body always fails")
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_classify_batch_snapshots_inputs_before_awaiting():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    events: list[ClassifyEvent] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await release.wait()
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "predictions": [
+                    {
+                        "prediction": "MALICIOUS",
+                        "score": 0.9,
+                        "threshold": 0.5,
+                        "mode": "block",
+                    },
+                    {
+                        "prediction": "BENIGN",
+                        "score": 0.1,
+                        "threshold": 0.5,
+                        "mode": "block",
+                    },
+                ]
+            },
+        )
+
+    texts = ["attack", "safe"]
+    hooks = [HookLabel.USER_INPUT, HookLabel.TOOL_RESPONSE]
+    tool_names: list[str | None] = ["chat", "tool"]
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            on_classify=events.append,
+        )
+        batch = asyncio.create_task(
+            fw.classify_batch(texts, hooks=hooks, tool_names=tool_names)
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        texts.clear()
+        hooks.clear()
+        tool_names.clear()
+        release.set()
+
+        with pytest.raises(BatchFirewallBlockedException) as exc_info:
+            await asyncio.wait_for(batch, timeout=1)
+
+    assert [event.text for event in events] == ["attack", "safe"]
+    assert [event.hook for event in events] == [HookLabel.USER_INPUT, HookLabel.TOOL_RESPONSE]
+    assert [result.prediction for result in exc_info.value.results] == ["MALICIOUS", "BENIGN"]
+    blocked = exc_info.value.blocked[0]
+    assert (blocked.index, blocked.text, blocked.hook, blocked.tool_name) == (
+        0,
+        "attack",
+        HookLabel.USER_INPUT,
+        "chat",
+    )
