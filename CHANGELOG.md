@@ -14,7 +14,8 @@ All notable changes to the Silmaril Firewall Python SDK are documented here.
 - Drain in-flight async requests and retries on `aclose()` while rejecting new
   work, so shutdown cannot fail a concurrent classification. Closing from inside
   one's own in-flight classification raises instead of closing the pool early,
-  and concurrent callers return only once the pool is closed.
+  and concurrent callers return only once the pool is closed. Cancelling an
+  `aclose()` waiter does not abort shutdown or leak an SDK-owned client.
 - Retry HTTPX transport failures raised while streaming a response body, for
   both success and error bodies, instead of surfacing a partial error.
 - Snapshot async batch texts, hooks, and tool names before sending so results

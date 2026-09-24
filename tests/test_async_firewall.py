@@ -629,6 +629,132 @@ async def test_concurrent_aclose_callers_wait_for_owned_client_close(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_cancelled_aclose_waiter_still_closes_owned_pool_once(monkeypatch):
+    close_calls = 0
+    attempts = 0
+    real_async_client = httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if json.loads(request.content)["text"] == "retrying" and attempts == 1:
+            return response(request, status=503)
+        return response(request)
+
+    class CountingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.inner = real_async_client(transport=httpx.MockTransport(handle), **kwargs)
+
+        @property
+        def is_closed(self) -> bool:
+            return bool(self.inner.is_closed)
+
+        def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+            return self.inner.build_request(*args, **kwargs)
+
+        async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            return await self.inner.send(request, **kwargs)
+
+        async def aclose(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            await self.inner.aclose()
+
+    monkeypatch.setattr(httpx, "AsyncClient", CountingClient)
+    fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, max_retries=1)
+
+    sleeping = asyncio.Event()
+    sleep_release = asyncio.Event()
+
+    async def held_sleep(attempt: int, retry_after: str | None) -> None:
+        sleeping.set()
+        await sleep_release.wait()
+
+    monkeypatch.setattr(fw, "_sleep_before_retry", held_sleep)
+
+    retrying = asyncio.create_task(fw.classify("retrying"))
+    await asyncio.wait_for(sleeping.wait(), timeout=1)
+
+    closing = asyncio.create_task(fw.aclose())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert closing.done() is False
+    assert fw._client.is_closed is False
+
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await fw.classify("rejected")
+    assert close_calls == 0
+    assert fw._client.is_closed is False
+
+    sleep_release.set()
+    assert (await retrying).prediction == "BENIGN"
+    await asyncio.wait_for(fw._close_task, timeout=1)
+
+    assert close_calls == 1
+    assert fw._closed is True
+    assert fw._client.is_closed is True
+    with pytest.raises(RuntimeError, match="closed"):
+        await fw.classify("after close")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_aclose_waiter_during_client_close_still_closes_once(monkeypatch):
+    close_started = asyncio.Event()
+    close_release = asyncio.Event()
+    close_calls = 0
+    real_async_client = httpx.AsyncClient
+
+    class SlowClosingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.inner = real_async_client(
+                transport=httpx.MockTransport(lambda request: response(request)),
+                **kwargs,
+            )
+
+        @property
+        def is_closed(self) -> bool:
+            return bool(self.inner.is_closed)
+
+        def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+            return self.inner.build_request(*args, **kwargs)
+
+        async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            return await self.inner.send(request, **kwargs)
+
+        async def aclose(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            close_started.set()
+            await close_release.wait()
+            await self.inner.aclose()
+
+    monkeypatch.setattr(httpx, "AsyncClient", SlowClosingClient)
+    fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL)
+    await fw.classify("warm the pool")
+
+    closing = asyncio.create_task(fw.aclose())
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert close_calls == 1
+    assert fw._client.is_closed is False
+
+    close_release.set()
+    await asyncio.wait_for(fw._close_task, timeout=1)
+
+    assert close_calls == 1
+    assert fw._client.is_closed is True
+    with pytest.raises(RuntimeError, match="closed"):
+        await fw.classify("after close")
+
+
+@pytest.mark.asyncio
 async def test_body_read_error_is_retried_and_then_succeeds(monkeypatch):
     attempts = 0
     sleeps: list[tuple[int, str | None]] = []

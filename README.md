@@ -155,8 +155,10 @@ loop or after `aclose()`.
 requests that are already sending or waiting to retry are allowed to finish, and
 only then is an SDK-owned pool closed. Exiting the `async with` block calls it
 for you, repeated calls are idempotent, and concurrent callers all return once
-the pool is actually closed. If `http_client=` supplies an `httpx.AsyncClient`,
-the caller retains ownership and must close it.
+the pool is actually closed. Cancelling a task that is awaiting `aclose()`
+cancels only that waiter: shutdown continues, and an SDK-owned pool still
+closes once in-flight work finishes. If `http_client=` supplies an
+`httpx.AsyncClient`, the caller retains ownership and must close it.
 
 Closing from inside your own in-flight classification raises `RuntimeError`
 instead of tearing the pool out from under that request. An `on_classify`

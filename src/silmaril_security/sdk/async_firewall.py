@@ -125,7 +125,7 @@ class AsyncFirewall:
         self._request_tasks: set[asyncio.Task[Any]] = set()
         self._idle = asyncio.Event()
         self._idle.set()
-        self._close_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> AsyncFirewall:
         self._ensure_client()
@@ -147,25 +147,53 @@ class AsyncFirewall:
         task and closing early would break that task's own request. An
         ``on_classify`` callback runs after its request completes, so closing from
         a callback is supported.
+
+        Cancelling a task that is awaiting ``aclose()`` cancels only that waiter.
+        The drain-and-close work continues on a shared close task, so an SDK-owned
+        pool is not leaked. A failed close is logged, re-raised to remaining
+        waiters, and can be retried; it does not leave a permanent closing state.
         """
         if self._closed:
             return
-        if self._loop is not None and asyncio.get_running_loop() is not self._loop:
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif loop is not self._loop:
             raise RuntimeError("AsyncFirewall cannot be used from a different event loop")
         if asyncio.current_task() in self._request_tasks:
             raise RuntimeError(
                 "AsyncFirewall.aclose() cannot be called from inside an active "
                 "classification on the same task; close it after the call returns"
             )
-        self._closing = True
-        if self._active_requests:
-            await self._idle.wait()
-        async with self._close_lock:
-            if self._closed:
-                return
+        await asyncio.shield(self._ensure_close_task())
+
+    def _ensure_close_task(self) -> asyncio.Task[None]:
+        if self._close_task is None:
+            self._closing = True
+            task = asyncio.get_running_loop().create_task(self._drain_and_close())
+            task.add_done_callback(self._observe_close_task)
+            self._close_task = task
+        return self._close_task
+
+    async def _drain_and_close(self) -> None:
+        try:
+            if self._active_requests:
+                await self._idle.wait()
             if self._owns_client and self._client is not None:
                 await self._client.aclose()
             self._closed = True
+        except BaseException:
+            self._closing = False
+            self._close_task = None
+            raise
+
+    def _observe_close_task(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            LOG.warning("AsyncFirewall close task was cancelled")
+            return
+        exc = task.exception()
+        if exc is not None:
+            LOG.warning("AsyncFirewall close failed", exc_info=exc)
 
     async def classify(
         self,
