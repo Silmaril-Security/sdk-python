@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from silmaril_security.sdk._version import VERSION
+from silmaril_security.sdk.async_firewall import AsyncFirewall
 from silmaril_security.sdk.exceptions import (
     APIError,
     BatchFirewallBlockedException,
@@ -70,6 +71,7 @@ __version__ = VERSION
 __all__ = [
     "ALL_HOOKS",
     "APIError",
+    "AsyncFirewall",
     "BlockResult",
     "BlockedBatchItem",
     "BatchFirewallBlockedException",

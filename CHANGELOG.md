@@ -2,6 +2,29 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.6.1 - 2026-09-24
+
+- Add public `AsyncFirewall` single and batch classification with a persistent
+  `httpx.AsyncClient` pool, async context management, and task-safe concurrent
+  use on one event loop.
+- Preserve synchronous mode, callback, blocking, metadata, retry, sanitization,
+  and one-request batch behavior in the native async API.
+- Support caller-owned async clients, idempotent close, cancellation, and clear
+  closed-client and cross-event-loop errors.
+- Drain in-flight async requests and retries on `aclose()` while rejecting new
+  work, so shutdown cannot fail a concurrent classification. Closing from inside
+  one's own in-flight classification raises instead of closing the pool early,
+  and concurrent callers return only once the pool is closed. Cancelling an
+  `aclose()` waiter does not abort shutdown or leak an SDK-owned client.
+- Retry HTTPX transport failures raised while streaming a response body, for
+  both success and error bodies, instead of surfacing a partial error.
+- Snapshot async batch texts, hooks, and tool names before sending so results
+  and blocked items always describe the request that was sent.
+- Stream async error responses and stop reading at the 64 KiB cap instead of
+  buffering an oversized body before truncating it.
+- Allow async LangChain handlers to share an `AsyncFirewall` pool while keeping
+  the existing `Firewall.as_async_langchain_handler()` temporary-client path.
+
 ## 0.6.0 - 2026-08-22
 
 - Add the existing `shadow | warn | block` request mode contract to single and

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -15,7 +14,6 @@ from silmaril_security.sdk import (
     HookLabel,
     SilmarilApiError,
 )
-from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
 
 pytest.importorskip("langchain_core.callbacks")
 
@@ -195,7 +193,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     payloads = []
 
-    async def fake_post_json(client, firewall, payload):
+    async def fake_post_json(self, payload):
         payloads.append(payload)
         return {
             "prediction": "BENIGN",
@@ -204,7 +202,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
             "mode": "block",
         }
 
-    monkeypatch.setattr("silmaril_security.sdk.langchain._async_post_json", fake_post_json)
+    monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._post_json", fake_post_json)
 
     result = await _async_classify_raw(
         fw,
@@ -224,7 +222,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
     assert payload["metadata"]["silmaril"] == {
         "sdk_language": "python",
-        "sdk_version": "0.6.0",
+        "sdk_version": "0.6.1",
         "request_id": "async-req",
     }
     assert "threshold" not in payload
@@ -239,79 +237,17 @@ async def test_async_langchain_requested_warn_survives_legacy_mode_less_response
     )
     handler = fw.as_async_langchain_handler()
 
-    async def fake_post_json(client, firewall, payload):
+    async def fake_post_json(self, payload):
         return {
             "prediction": "MALICIOUS",
             "score": 0.9,
             "threshold": 0.5,
         }
 
-    monkeypatch.setattr("silmaril_security.sdk.langchain._async_post_json", fake_post_json)
+    monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._post_json", fake_post_json)
 
     await handler.on_chat_model_start(
         serialized={},
         messages=[[{"role": "user", "content": "attack"}]],
         run_id=uuid4(),
     )
-
-
-@pytest.mark.asyncio
-async def test_async_post_json_rejects_redirects():
-    from silmaril_security.sdk.langchain import _async_post_json
-
-    class FakeAsyncResponse:
-        status_code = 302
-        headers: dict[str, str] = {}
-        reason_phrase = "Found"
-        text = "redirect"
-
-        async def aclose(self) -> None:
-            pass
-
-    class FakeAsyncClient:
-        calls: list[dict[str, Any]]
-
-        def __init__(self) -> None:
-            self.calls = []
-
-        async def post(self, url: str, **kwargs: Any) -> FakeAsyncResponse:
-            self.calls.append({"url": url, **kwargs})
-            return FakeAsyncResponse()
-
-    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
-    client = FakeAsyncClient()
-
-    with pytest.raises(SilmarilApiError) as exc_info:
-        await _async_post_json(client, fw, {"text": "hello", "threshold": 0.5})
-
-    assert client.calls[0]["follow_redirects"] is False
-    assert exc_info.value.status == 302
-    assert exc_info.value.body == "redirect"
-
-
-@pytest.mark.asyncio
-async def test_async_post_json_caps_error_body_and_redacts_message():
-    from silmaril_security.sdk.langchain import _async_post_json
-
-    body = "x" * (_MAX_ERROR_BODY_BYTES + 1024)
-
-    class FakeAsyncResponse:
-        status_code = 500
-        headers: dict[str, str] = {}
-        reason_phrase = "Internal Server Error"
-        text = body
-
-        async def aclose(self) -> None:
-            pass
-
-    class FakeAsyncClient:
-        async def post(self, url: str, **kwargs: Any) -> FakeAsyncResponse:
-            return FakeAsyncResponse()
-
-    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify", max_retries=0)
-
-    with pytest.raises(SilmarilApiError) as exc_info:
-        await _async_post_json(FakeAsyncClient(), fw, {"text": "hello", "threshold": 0.5})
-
-    assert exc_info.value.body == body[:_MAX_ERROR_BODY_BYTES]
-    assert body[:128] not in str(exc_info.value)

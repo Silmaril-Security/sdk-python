@@ -40,7 +40,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.6.0
+pip install silmaril-security-sdk==0.6.1
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -60,6 +60,12 @@ Optional LangChain support:
 
 ```sh
 pip install "silmaril-security-sdk[langchain]"
+```
+
+Native async support without LangChain:
+
+```sh
+pip install "silmaril-security-sdk[async]"
 ```
 
 ## Configuration
@@ -120,6 +126,46 @@ try:
 except FirewallBlockedException as exc:
     print(f"blocked: score={exc.score:.4f} threshold={exc.threshold:.4f}")
 ```
+
+## Async Client
+
+`AsyncFirewall` has the same classification options, results, modes, callbacks,
+and blocking exceptions as `Firewall`. It keeps one pooled `httpx.AsyncClient`
+for concurrent calls:
+
+```python
+import os
+
+from silmaril_security.sdk import AsyncFirewall, HookLabel
+
+
+async with AsyncFirewall(
+    api_key=os.environ["SILMARIL_API_KEY"],
+    api_url=os.environ["SILMARIL_API_URL"],
+) as fw:
+    result = await fw.classify(text, hook=HookLabel.USER_INPUT)
+    results = await fw.classify_batch([text1, text2])
+```
+
+One `AsyncFirewall` can be shared safely by concurrent tasks on one event loop.
+It binds to the first running loop that uses it and rejects use from another
+loop or after `aclose()`.
+
+`aclose()` shuts down gracefully: new classifications are rejected immediately,
+requests that are already sending or waiting to retry are allowed to finish, and
+only then is an SDK-owned pool closed. Exiting the `async with` block calls it
+for you, repeated calls are idempotent, and concurrent callers all return once
+the pool is actually closed. Cancelling a task that is awaiting `aclose()`
+cancels only that waiter: shutdown continues, and an SDK-owned pool still
+closes once in-flight work finishes. If `http_client=` supplies an
+`httpx.AsyncClient`, the caller retains ownership and must close it.
+
+Closing from inside your own in-flight classification raises `RuntimeError`
+instead of tearing the pool out from under that request. An `on_classify`
+callback runs after its request finishes, so closing from a callback works.
+
+For synchronous off-thread work, create one `Firewall` per worker thread.
+Neither client promises sharing across threads or event loops.
 
 ## Options
 
@@ -426,6 +472,11 @@ Async LangChain:
 ```python
 handler = fw.as_async_langchain_handler()
 ```
+
+Calling `as_async_langchain_handler()` on an `AsyncFirewall` shares its
+persistent pool. Calling it on a synchronous `Firewall` remains supported and
+uses a temporary async client for each handler classification. In both cases,
+handler `fail_open`, hook, run ID, blocking, and callback behavior is unchanged.
 
 ## Retries
 

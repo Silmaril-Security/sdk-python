@@ -68,6 +68,19 @@ def _legacy_mode(shadow_mode: bool | None) -> FirewallMode | None:
     return "shadow" if shadow_mode else "block"
 
 
+def _effective_mode(
+    default_mode: FirewallMode | None,
+    mode: FirewallMode | None,
+    shadow_mode: bool | None,
+) -> FirewallMode | None:
+    if mode is not None:
+        return _validate_mode(mode)
+    legacy_mode = _legacy_mode(shadow_mode)
+    if legacy_mode is not None:
+        return legacy_mode
+    return default_mode
+
+
 def _block_result_from_json(
     data: dict[str, Any],
     requested_mode: FirewallMode | None = None,
@@ -174,6 +187,106 @@ def _close_response(response: Any) -> None:
         close()
     except Exception:
         pass
+
+
+def _single_payload(
+    text: str,
+    *,
+    hook: HookLabel | str | None,
+    tool_name: str | None,
+    metadata: ClassificationMetadata | None,
+    request_id: str,
+    mode: FirewallMode | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"text": sanitize_text(text)}
+    if mode is not None:
+        payload["mode"] = mode
+    hook_str = hook_value(hook)
+    if hook_str:
+        payload["hook"] = hook_str
+    if tool_name:
+        payload["tool_name"] = tool_name
+    payload["metadata"] = _sdk_metadata(metadata, request_id=request_id)
+    return payload
+
+
+def _batch_payload(
+    texts: Sequence[str],
+    *,
+    hooks: Sequence[HookLabel | str] | None,
+    tool_names: Sequence[str | None] | None,
+    metadata: Sequence[ClassificationMetadata | None] | None,
+    request_id: str,
+    mode: FirewallMode | None,
+) -> tuple[list[str], dict[str, Any]]:
+    text_list = [sanitize_text(text) for text in texts]
+    if not text_list:
+        raise ValueError("Firewall: texts must not be empty")
+    if hooks is not None and len(hooks) != len(text_list):
+        raise ValueError(
+            f"Firewall: hooks length {len(hooks)} does not match texts length {len(text_list)}"
+        )
+    if tool_names is not None and len(tool_names) != len(text_list):
+        raise ValueError(
+            "Firewall: tool_names length "
+            f"{len(tool_names)} does not match texts length {len(text_list)}"
+        )
+    if metadata is not None and len(metadata) != len(text_list):
+        raise ValueError(
+            f"Firewall: metadata length {len(metadata)} does not match texts length "
+            f"{len(text_list)}"
+        )
+
+    payload: dict[str, Any] = {"texts": text_list}
+    if mode is not None:
+        payload["mode"] = mode
+    if hooks:
+        payload["hooks"] = [hook_value(h) for h in hooks]
+    if tool_names:
+        payload["tool_names"] = list(tool_names)
+    payload["metadata"] = [
+        _sdk_metadata(
+            metadata[index] if metadata is not None else None,
+            request_id=request_id,
+            input_index=index,
+        )
+        for index in range(len(text_list))
+    ]
+    return text_list, payload
+
+
+def _batch_results(
+    data: dict[str, Any],
+    *,
+    expected_length: int,
+    mode: FirewallMode | None,
+) -> list[BlockResult]:
+    predictions = data["predictions"]
+    if len(predictions) != expected_length:
+        raise ValueError(
+            "Firewall: predictions length "
+            f"{len(predictions)} does not match texts length {expected_length}"
+        )
+    return [_block_result_from_json(item, mode) for item in predictions]
+
+
+def _new_classify_event(
+    *,
+    text: str,
+    hook: HookLabel | str | None,
+    tool_name: str | None,
+    result: BlockResult,
+) -> ClassifyEvent:
+    effective_mode = result.mode or _LEGACY_RESPONSE_MODE
+    return ClassifyEvent(
+        hook=normalize_hook_label(hook),
+        tool_name=tool_name,
+        text=text,
+        result=result,
+        blocked=result.prediction == "MALICIOUS",
+        mode=effective_mode,
+        shadow_mode=effective_mode == "shadow",
+    )
 
 
 class Firewall:
@@ -323,13 +436,15 @@ class Firewall:
         request_id: str,
         mode: FirewallMode | None = None,
     ) -> BlockResult:
-        return self._classify_single_raw(
-            sanitize_text(text),
+        payload = _single_payload(
+            text,
             hook=hook,
             tool_name=tool_name,
-            metadata=_sdk_metadata(metadata, request_id=request_id),
+            metadata=metadata,
+            request_id=request_id,
             mode=mode,
         )
+        return _block_result_from_json(self._post_json(payload), mode)
 
     def _classify_single_raw(
         self,
@@ -363,48 +478,16 @@ class Firewall:
         request_id: str,
         mode: FirewallMode | None = None,
     ) -> list[BlockResult]:
-        text_list = [sanitize_text(text) for text in texts]
-        if not text_list:
-            raise ValueError("Firewall: texts must not be empty")
-        if hooks is not None and len(hooks) != len(text_list):
-            raise ValueError(
-                f"Firewall: hooks length {len(hooks)} does not match texts length {len(text_list)}"
-            )
-        if tool_names is not None and len(tool_names) != len(text_list):
-            raise ValueError(
-                "Firewall: tool_names length "
-                f"{len(tool_names)} does not match texts length {len(text_list)}"
-            )
-        if metadata is not None and len(metadata) != len(text_list):
-            raise ValueError(
-                f"Firewall: metadata length {len(metadata)} does not match texts length "
-                f"{len(text_list)}"
-            )
-
-        payload: dict[str, Any] = {"texts": text_list}
-        if mode is not None:
-            payload["mode"] = mode
-        if hooks:
-            payload["hooks"] = [hook_value(h) for h in hooks]
-        if tool_names:
-            payload["tool_names"] = list(tool_names)
-        payload["metadata"] = [
-            _sdk_metadata(
-                metadata[index] if metadata is not None else None,
-                request_id=request_id,
-                input_index=index,
-            )
-            for index in range(len(text_list))
-        ]
-
+        text_list, payload = _batch_payload(
+            texts,
+            hooks=hooks,
+            tool_names=tool_names,
+            metadata=metadata,
+            request_id=request_id,
+            mode=mode,
+        )
         data = self._post_json(payload)
-        predictions = data["predictions"]
-        if len(predictions) != len(text_list):
-            raise ValueError(
-                "Firewall: predictions length "
-                f"{len(predictions)} does not match texts length {len(text_list)}"
-            )
-        return [_block_result_from_json(item, mode) for item in predictions]
+        return _batch_results(data, expected_length=len(text_list), mode=mode)
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)
@@ -450,12 +533,7 @@ class Firewall:
         mode: FirewallMode | None,
         shadow_mode: bool | None,
     ) -> FirewallMode | None:
-        if mode is not None:
-            return _validate_mode(mode)
-        legacy_mode = _legacy_mode(shadow_mode)
-        if legacy_mode is not None:
-            return legacy_mode
-        return self.mode
+        return _effective_mode(self.mode, mode, shadow_mode)
 
     def _new_classify_event(
         self,
@@ -465,16 +543,7 @@ class Firewall:
         tool_name: str | None,
         result: BlockResult,
     ) -> ClassifyEvent:
-        effective_mode = result.mode or _LEGACY_RESPONSE_MODE
-        return ClassifyEvent(
-            hook=normalize_hook_label(hook),
-            tool_name=tool_name,
-            text=text,
-            result=result,
-            blocked=result.prediction == "MALICIOUS",
-            mode=effective_mode,
-            shadow_mode=effective_mode == "shadow",
-        )
+        return _new_classify_event(text=text, hook=hook, tool_name=tool_name, result=result)
 
     def _fire_on_classify(self, event: ClassifyEvent) -> None:
         if self.on_classify is None:
