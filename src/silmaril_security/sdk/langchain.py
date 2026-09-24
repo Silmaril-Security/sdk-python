@@ -21,6 +21,7 @@ from silmaril_security.sdk._utils import (
     get_content,
     get_role,
 )
+from silmaril_security.sdk.async_firewall import AsyncFirewall
 from silmaril_security.sdk.exceptions import FirewallBlockedException
 from silmaril_security.sdk.firewall import Firewall
 from silmaril_security.sdk.hooks import (
@@ -259,7 +260,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
 
     def __init__(
         self,
-        firewall: Firewall,
+        firewall: Firewall | AsyncFirewall,
         *,
         hooks: Iterable[FirewallHook | str] | None = None,
         include_system: bool = True,
@@ -452,7 +453,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
 
 
 async def _async_classify_raw(
-    firewall: Firewall,
+    firewall: Firewall | AsyncFirewall,
     text: str,
     *,
     hook: HookLabel | str | None,
@@ -461,76 +462,29 @@ async def _async_classify_raw(
     request_id: str | None = None,
     mode: FirewallMode | None = None,
 ) -> BlockResult:
-    import httpx
-
-    from silmaril_security.sdk.firewall import _block_result_from_json, _sdk_metadata
-    from silmaril_security.sdk.hooks import hook_value
-    from silmaril_security.sdk.sanitization import sanitize_text
-
     request_id_value = request_id or str(uuid4())
-    headers = {"x-api-key": firewall.api_key, "content-type": "application/json"}
-    async with httpx.AsyncClient(
-        headers=headers,
-        timeout=firewall.timeout,
-        follow_redirects=False,
-    ) as client:
-        payload: dict[str, Any] = {"text": sanitize_text(text)}
-        if mode is not None:
-            payload["mode"] = mode
-        hook_str = hook_value(hook)
-        if hook_str:
-            payload["hook"] = hook_str
-        if tool_name:
-            payload["tool_name"] = tool_name
-        payload["metadata"] = _sdk_metadata(
-            metadata,
+    if isinstance(firewall, AsyncFirewall):
+        return await firewall._classify_raw(
+            text,
+            hook=hook,
+            tool_name=tool_name,
+            metadata=metadata,
             request_id=request_id_value,
+            mode=mode,
         )
-        data = await _async_post_json(client, firewall, payload)
-        return _block_result_from_json(data, mode)
 
-
-async def _async_post_json(client: Any, firewall: Firewall, payload: dict[str, Any]) -> dict[str, Any]:
-    import asyncio
-
-    import httpx
-
-    from silmaril_security.sdk.firewall import (
-        _MAX_ERROR_BODY_BYTES,
-        _RETRYABLE_STATUS_CODES,
-        _retry_after_seconds,
-    )
-
-    for attempt in range(firewall.max_retries + 1):
-        try:
-            response = await client.post(
-                firewall.api_url,
-                json=payload,
-                follow_redirects=False,
-            )
-        except httpx.HTTPError:
-            if attempt < firewall.max_retries:
-                await asyncio.sleep(min(2**attempt, 30.0))
-                continue
-            raise
-        if response.status_code in _RETRYABLE_STATUS_CODES and attempt < firewall.max_retries:
-            retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
-            await response.aclose()
-            await asyncio.sleep(retry_after if retry_after is not None else min(2**attempt, 30.0))
-            continue
-        if response.status_code >= 300:
-            try:
-                body = response.text[:_MAX_ERROR_BODY_BYTES]
-            except Exception:
-                body = ""
-            await response.aclose()
-            raise __import__(
-                "silmaril_security.sdk.exceptions",
-                fromlist=["SilmarilApiError"],
-            ).SilmarilApiError(
-                status=response.status_code,
-                status_text=response.reason_phrase,
-                body=body,
-            )
-        return response.json()
-    raise RuntimeError("Firewall: exhausted retries")
+    async with AsyncFirewall(
+        api_key=firewall.api_key,
+        api_url=firewall.api_url,
+        timeout=firewall.timeout,
+        mode=firewall.mode,
+        max_retries=firewall.max_retries,
+    ) as async_firewall:
+        return await async_firewall._classify_raw(
+            text,
+            hook=hook,
+            tool_name=tool_name,
+            metadata=metadata,
+            request_id=request_id_value,
+            mode=mode,
+        )
