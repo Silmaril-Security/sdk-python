@@ -19,6 +19,12 @@ All notable changes to the Silmaril Firewall Python SDK are documented here.
 - Pin the isolated Hatchling build backend to the supported 1.27 release line
   so release artifacts use Core Metadata 2.4 accepted by the package checks.
 
+Compatibility: deploy compatible Firewall readers before installing this SDK.
+Upgrade Hermes and other Python adapters after the SDK is published. Keep
+existing policies on their current schema until every enforcement consumer in
+the target scope is verified against contract 1.0.0; then explicitly activate
+runtime schema 6.
+
 ## 0.6.1 - 2026-09-24
 
 - Add public `AsyncFirewall` single and batch classification with a persistent
