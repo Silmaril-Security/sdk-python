@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GovernanceResourceReference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "id"
+  ],
+  "properties": {
+    "kind": {
+      "enum": [
+        "agent",
+        "tool",
+        "mcp_server",
+        "mcp_tool",
+        "plugin",
+        "skill",
+        "extension"
+      ]
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "parent_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "mcp_tool"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "parent_id"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "parent_id"
+          ]
+        }
+      }
+    }
+  ]
+}

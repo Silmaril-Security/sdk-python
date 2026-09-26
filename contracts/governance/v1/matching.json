@@ -1,0 +1,395 @@
+{
+  "contract_version": "1.0.0",
+  "cases": [
+    {
+      "name": "agent exact",
+      "selector": {
+        "kind": "agent",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "agent",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "agent wildcard",
+      "selector": {
+        "kind": "agent"
+      },
+      "actual": {
+        "kind": "agent",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "agent missing",
+      "selector": {
+        "kind": "agent"
+      },
+      "actual": null,
+      "matches": false
+    },
+    {
+      "name": "agent other identity",
+      "selector": {
+        "kind": "agent",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "agent",
+        "id": "y"
+      },
+      "matches": false
+    },
+    {
+      "name": "tool exact",
+      "selector": {
+        "kind": "tool",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "tool",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "tool wildcard",
+      "selector": {
+        "kind": "tool"
+      },
+      "actual": {
+        "kind": "tool",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "tool missing",
+      "selector": {
+        "kind": "tool"
+      },
+      "actual": null,
+      "matches": false
+    },
+    {
+      "name": "tool other identity",
+      "selector": {
+        "kind": "tool",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "tool",
+        "id": "y"
+      },
+      "matches": false
+    },
+    {
+      "name": "mcp_server exact",
+      "selector": {
+        "kind": "mcp_server",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "mcp_server",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "mcp_server wildcard",
+      "selector": {
+        "kind": "mcp_server"
+      },
+      "actual": {
+        "kind": "mcp_server",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "mcp_server missing",
+      "selector": {
+        "kind": "mcp_server"
+      },
+      "actual": null,
+      "matches": false
+    },
+    {
+      "name": "mcp_server other identity",
+      "selector": {
+        "kind": "mcp_server",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "mcp_server",
+        "id": "y"
+      },
+      "matches": false
+    },
+    {
+      "name": "mcp_tool exact",
+      "selector": {
+        "kind": "mcp_tool",
+        "id": "x",
+        "parent_id": "server"
+      },
+      "actual": {
+        "kind": "mcp_tool",
+        "id": "x",
+        "parent_id": "server"
+      },
+      "matches": true
+    },
+    {
+      "name": "mcp_tool wildcard",
+      "selector": {
+        "kind": "mcp_tool",
+        "parent_id": "server"
+      },
+      "actual": {
+        "kind": "mcp_tool",
+        "id": "x",
+        "parent_id": "server"
+      },
+      "matches": true
+    },
+    {
+      "name": "mcp_tool missing",
+      "selector": {
+        "kind": "mcp_tool",
+        "parent_id": "server"
+      },
+      "actual": null,
+      "matches": false
+    },
+    {
+      "name": "mcp_tool other identity",
+      "selector": {
+        "kind": "mcp_tool",
+        "id": "x",
+        "parent_id": "server"
+      },
+      "actual": {
+        "kind": "mcp_tool",
+        "id": "y",
+        "parent_id": "server"
+      },
+      "matches": false
+    },
+    {
+      "name": "plugin exact",
+      "selector": {
+        "kind": "plugin",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "plugin",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "plugin wildcard",
+      "selector": {
+        "kind": "plugin"
+      },
+      "actual": {
+        "kind": "plugin",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "plugin missing",
+      "selector": {
+        "kind": "plugin"
+      },
+      "actual": null,
+      "matches": false
+    },
+    {
+      "name": "plugin other identity",
+      "selector": {
+        "kind": "plugin",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "plugin",
+        "id": "y"
+      },
+      "matches": false
+    },
+    {
+      "name": "skill exact",
+      "selector": {
+        "kind": "skill",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "skill",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "skill wildcard",
+      "selector": {
+        "kind": "skill"
+      },
+      "actual": {
+        "kind": "skill",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "skill missing",
+      "selector": {
+        "kind": "skill"
+      },
+      "actual": null,
+      "matches": false
+    },
+    {
+      "name": "skill other identity",
+      "selector": {
+        "kind": "skill",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "skill",
+        "id": "y"
+      },
+      "matches": false
+    },
+    {
+      "name": "extension exact",
+      "selector": {
+        "kind": "extension",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "extension",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "extension wildcard",
+      "selector": {
+        "kind": "extension"
+      },
+      "actual": {
+        "kind": "extension",
+        "id": "x"
+      },
+      "matches": true
+    },
+    {
+      "name": "extension missing",
+      "selector": {
+        "kind": "extension"
+      },
+      "actual": null,
+      "matches": false
+    },
+    {
+      "name": "extension other identity",
+      "selector": {
+        "kind": "extension",
+        "id": "x"
+      },
+      "actual": {
+        "kind": "extension",
+        "id": "y"
+      },
+      "matches": false
+    },
+    {
+      "name": "unrestricted",
+      "selector": null,
+      "actual": null,
+      "matches": true
+    },
+    {
+      "name": "server child",
+      "selector": {
+        "kind": "mcp_server",
+        "id": "arxiv-mcp-server"
+      },
+      "actual": {
+        "kind": "mcp_tool",
+        "id": "search_papers",
+        "parent_id": "arxiv-mcp-server"
+      },
+      "matches": true
+    },
+    {
+      "name": "different parent",
+      "selector": {
+        "kind": "mcp_server",
+        "id": "arxiv-mcp-server"
+      },
+      "actual": {
+        "kind": "mcp_tool",
+        "id": "search_papers",
+        "parent_id": "other"
+      },
+      "matches": false
+    },
+    {
+      "name": "all servers child",
+      "selector": {
+        "kind": "mcp_server"
+      },
+      "actual": {
+        "kind": "mcp_tool",
+        "id": "search_papers",
+        "parent_id": "other"
+      },
+      "matches": true
+    },
+    {
+      "name": "no native inheritance",
+      "selector": {
+        "kind": "mcp_server",
+        "id": "arxiv-mcp-server"
+      },
+      "actual": {
+        "kind": "tool",
+        "id": "search_papers"
+      },
+      "matches": false
+    },
+    {
+      "name": "same name distinct server",
+      "selector": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "a"
+      },
+      "actual": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "b"
+      },
+      "matches": false
+    },
+    {
+      "name": "no plugin inheritance",
+      "selector": {
+        "kind": "plugin",
+        "id": "p"
+      },
+      "actual": {
+        "kind": "skill",
+        "id": "p"
+      },
+      "matches": false
+    }
+  ]
+}
