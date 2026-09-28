@@ -36,13 +36,15 @@ def resolve_mcp_tool_identity(
 
     A supplied canonical resource is authoritative. Otherwise every configured
     server ID, explicit alias, and deterministic host alias is one candidate
-    set: an exact ID does not outrank an alias. The host alias replaces
+    set: an exact ID does not outrank an alias. Repeated catalog rows for one
+    canonical server ID contribute every alias. The host alias replaces
     hyphens in the configured server ID with underscores and never rewrites
     underscores as hyphens. Server-only catalogs take the nonempty remainder
     after a separator-bounded prefix, including further separators. A tool
     catalog matches complete ``mcp__{key}__{tool}`` or ``MCP:{key}:{tool}``
-    spellings. Identical canonical refs count once. Several distinct refs are
-    ambiguous, and none is unresolved.
+    spellings. Identical canonical refs count once. Several distinct refs,
+    including the same alias on different servers, are ambiguous, and none is
+    unresolved.
     """
 
     if authoritative_resource is not None:
@@ -136,7 +138,10 @@ def _tool_spelling_candidates(
     configured_tools: Sequence[Mapping[str, Any]],
     separator: str,
 ) -> list[tuple[str, str]]:
-    keys_by_server = {server_id: keys for server_id, keys in servers}
+    keys_by_server: dict[str, tuple[str, ...]] = {}
+    for server_id, keys in servers:
+        prior = keys_by_server.get(server_id, ())
+        keys_by_server[server_id] = tuple(dict.fromkeys((*prior, *keys)))
     candidates: list[tuple[str, str]] = []
     for entry in configured_tools:
         if not isinstance(entry, Mapping):

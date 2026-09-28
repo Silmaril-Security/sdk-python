@@ -430,6 +430,67 @@ def test_tool_catalog_matches_complete_spellings_and_dedupes():
     assert missing.status == "unresolved"
 
 
+def test_repeated_server_rows_keep_every_alias():
+    servers = [
+        {"id": "git", "aliases": ["origin"]},
+        {"id": "git", "aliases": ["docs"]},
+    ]
+    tools = [
+        {"id": "search", "parent_id": "git"},
+        {"id": "search__nested", "parent_id": "git"},
+        {"id": "search:nested", "parent_id": "git"},
+    ]
+    cases = [
+        ("mcp__origin__search", "search"),
+        ("mcp__docs__search", "search"),
+        ("MCP:origin:search", "search"),
+        ("MCP:docs:search", "search"),
+        ("mcp__origin__search__nested", "search__nested"),
+        ("mcp__docs__search__nested", "search__nested"),
+        ("MCP:origin:search:nested", "search:nested"),
+        ("MCP:docs:search:nested", "search:nested"),
+    ]
+    for configured in (servers, list(reversed(servers))):
+        for host_tool_name, tool_id in cases:
+            catalog = resolve_mcp_tool_identity(host_tool_name, configured, tools)
+            assert catalog.status == "resolved"
+            assert catalog.resource == GovernanceResource(
+                kind="mcp_tool",
+                id=tool_id,
+                parent_id="git",
+            )
+            server_only = resolve_mcp_tool_identity(host_tool_name, configured)
+            assert server_only.status == "resolved"
+            assert server_only.resource == catalog.resource
+
+
+def test_shared_alias_across_distinct_servers_stays_ambiguous():
+    servers = [
+        {"id": "git", "aliases": ["shared"]},
+        {"id": "docs", "aliases": ["shared"]},
+    ]
+    tools = [
+        {"id": "search", "parent_id": "git"},
+        {"id": "search", "parent_id": "docs"},
+        {"id": "search__nested", "parent_id": "git"},
+        {"id": "search__nested", "parent_id": "docs"},
+        {"id": "search:nested", "parent_id": "git"},
+        {"id": "search:nested", "parent_id": "docs"},
+    ]
+    for host_tool_name in (
+        "mcp__shared__search",
+        "MCP:shared:search",
+        "mcp__shared__search__nested",
+        "MCP:shared:search:nested",
+    ):
+        catalog = resolve_mcp_tool_identity(host_tool_name, servers, tools)
+        assert catalog.status == "ambiguous"
+        assert catalog.resource is None
+        server_only = resolve_mcp_tool_identity(host_tool_name, servers)
+        assert server_only.status == "ambiguous"
+        assert server_only.resource is None
+
+
 def test_tool_catalog_exact_and_alias_spellings_are_ambiguous():
     resolution = resolve_mcp_tool_identity(
         "MCP:prod_west:search",
