@@ -454,8 +454,8 @@ def test_classify_batch_serializes_metadata(monkeypatch):
     fw.classify_batch(
         ["first", "second"],
         metadata=[
-            {"langgraph": {"run_id": "run-a"}},
-            None,
+            {"langgraph": {"run_id": "run-a"}, "silmaril": {"agent_model_id": "provider/model-a"}},
+            {"silmaril": {"agent_model_id": "provider/model-b"}},
         ],
         request_id="batch-req",
     )
@@ -466,6 +466,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
             {
                 "langgraph": {"run_id": "run-a"},
                 "silmaril": {
+                    "agent_model_id": "provider/model-a",
                     "sdk_language": "python",
                     "sdk_version": "0.6.1",
                     "request_id": "batch-req",
@@ -474,6 +475,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
             },
             {
                 "silmaril": {
+                    "agent_model_id": "provider/model-b",
                     "sdk_language": "python",
                     "sdk_version": "0.6.1",
                     "request_id": "batch-req",
