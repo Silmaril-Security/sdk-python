@@ -56,6 +56,9 @@ resolution = resolve_mcp_tool_identity(
     "mcp__arxiv_mcp_server__search",
     ["arxiv-mcp-server"],
 )
+resource = resolution.resource
+if resolution.status != "resolved" or resource is None:
+    raise RuntimeError("MCP identity is not resolved")
 fw = Firewall(
     api_key=os.environ["SILMARIL_API_KEY"],
     api_url=os.environ["SILMARIL_API_URL"],
@@ -64,15 +67,16 @@ fw.classify(
     "query the paper catalog",
     hook=HookLabel.TOOL_CALL,
     tool_name="mcp__arxiv_mcp_server__search",
-    resource=resolution.resource,
-    identity_revision="catalog-1",
+    resource=resource,
+    identity_revision=catalog_snapshot_id,
 )
 ```
 
-For this catalog, `resolution.resource` is
+This catalog resolves to
 `GovernanceResource(kind="mcp_tool", id="search", parent_id="arxiv-mcp-server")`.
-`resource` and `identity_revision` are optional; omit them to keep the legacy
-request shape.
+`catalog_snapshot_id` is the immutable revision of the catalog snapshot used
+for that resolution. In Block mode, classify an MCP call only after identity
+resolves to that resource and revision.
 
 Use a GitHub branch install only when you intentionally want the current branch
 tip:
