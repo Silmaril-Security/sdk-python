@@ -32,9 +32,9 @@ def resolve_mcp_tool_identity(
     """Resolve a host MCP tool name using only supplied configured server IDs.
 
     Exact configured IDs are matched as complete prefixes, so an ID may itself
-    contain ``__`` or ``:``. One nonempty tool remainder resolves. Multiple
-    exact prefixes are ambiguous. A hyphen-to-underscore alias is considered
-    only when no exact prefix matches, and only a unique alias resolves.
+    contain ``__`` or ``:``. When several exact prefixes match, the longest
+    configured server ID wins. A hyphen-to-underscore alias is considered only
+    when no exact prefix matches, and only a unique alias resolves.
     """
 
     form = _host_form(host_tool_name)
@@ -50,9 +50,10 @@ def resolve_mcp_tool_identity(
         separator,
         alias=False,
     )
-    if len(exact) == 1:
-        return _resolved(*exact[0])
-    if len(exact) > 1:
+    selected = _unique_longest(exact)
+    if selected is not None:
+        return _resolved(*selected)
+    if exact:
         return McpIdentityResolution(status="ambiguous")
 
     aliases = _prefix_matches(
@@ -113,6 +114,18 @@ def _prefix_matches(
         if _has_non_whitespace(tool_id):
             matches.append((server_id, tool_id))
     return matches
+
+
+def _unique_longest(
+    matches: Sequence[tuple[str, str]],
+) -> tuple[str, str] | None:
+    if not matches:
+        return None
+    longest = max(len(server_id) for server_id, _tool_id in matches)
+    winners = [match for match in matches if len(match[0]) == longest]
+    if len(winners) == 1:
+        return winners[0]
+    return None
 
 
 def _resolved(server_id: str, tool_id: str) -> McpIdentityResolution:

@@ -201,16 +201,55 @@ def test_resolver_keeps_separator_ids_authoritative(host_tool_name, server_id):
 
 
 @pytest.mark.parametrize(
-    ("host_tool_name", "server_ids"),
+    ("host_tool_name", "server_ids", "server_id", "tool_id"),
     [
-        ("mcp__prod__west__search", ["prod", "prod__west"]),
-        ("MCP:prod:west:search", ["prod", "prod:west"]),
+        (
+            "mcp__prod__west__search",
+            ["prod", "prod__west"],
+            "prod__west",
+            "search",
+        ),
+        (
+            "MCP:prod:west:search",
+            ["prod", "prod:west"],
+            "prod:west",
+            "search",
+        ),
+        (
+            "mcp__prod__west__edge__search",
+            ["prod", "prod__west", "prod__west__edge"],
+            "prod__west__edge",
+            "search",
+        ),
     ],
 )
-def test_resolver_reports_overlapping_exact_prefixes(host_tool_name, server_ids):
-    resolution = resolve_mcp_tool_identity(host_tool_name, server_ids)
-    assert resolution.status == "ambiguous"
-    assert resolution.resource is None
+def test_resolver_prefers_longest_exact_configured_prefix(
+    host_tool_name,
+    server_ids,
+    server_id,
+    tool_id,
+):
+    for configured_ids in (server_ids, list(reversed(server_ids))):
+        resolution = resolve_mcp_tool_identity(host_tool_name, configured_ids)
+        assert resolution.status == "resolved"
+        assert resolution.resource == GovernanceResource(
+            kind="mcp_tool",
+            id=tool_id,
+            parent_id=server_id,
+        )
+
+
+def test_resolver_keeps_shorter_exact_prefix_when_longer_id_does_not_match():
+    resolution = resolve_mcp_tool_identity(
+        "mcp__prod__search",
+        ["prod__west", "prod"],
+    )
+    assert resolution.status == "resolved"
+    assert resolution.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="prod",
+    )
 
 
 def test_resolver_prefers_exact_separator_prefix_over_alias_collision():
