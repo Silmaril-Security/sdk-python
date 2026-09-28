@@ -675,6 +675,162 @@
         "parent_id": "git-hub"
       },
       "failure": null
+    },
+    {
+      "name": "derived hyphen host spelling",
+      "raw_name": "mcp__arxiv_mcp_server__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "arxiv-mcp-server"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "arxiv-mcp-server"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "arxiv-mcp-server"
+      },
+      "failure": null
+    },
+    {
+      "name": "derived hyphen host spelling MCP:",
+      "raw_name": "MCP:arxiv_mcp_server:search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "arxiv-mcp-server"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "arxiv-mcp-server"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "arxiv-mcp-server"
+      },
+      "failure": null
+    },
+    {
+      "name": "derived hyphen alias collides with exact id",
+      "raw_name": "mcp__arxiv_mcp_server__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "arxiv-mcp-server"
+          },
+          {
+            "id": "arxiv_mcp_server"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "arxiv-mcp-server"
+          },
+          {
+            "id": "search",
+            "parent_id": "arxiv_mcp_server"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "ambiguous"
+    },
+    {
+      "name": "unrelated dispatch unresolved",
+      "raw_name": "mcp__unrelated__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "arxiv-mcp-server"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "arxiv-mcp-server"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "unresolved"
+    },
+    {
+      "name": "reverse underscore to hyphen unresolved",
+      "raw_name": "mcp__arxiv-mcp-server__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "arxiv_mcp_server"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "arxiv_mcp_server"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "unresolved"
+    },
+    {
+      "name": "shared derived host key one configured tool",
+      "raw_name": "mcp__git_hub__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git-hub"
+          },
+          {
+            "id": "git_hub"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "git-hub"
+          },
+          {
+            "id": "list",
+            "parent_id": "git_hub"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "git-hub"
+      },
+      "failure": null
+    },
+    {
+      "name": "shared derived host key server ids only",
+      "raw_name": "mcp__git_hub__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git-hub"
+          },
+          {
+            "id": "git_hub"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "ambiguous"
     }
   ]
 }
