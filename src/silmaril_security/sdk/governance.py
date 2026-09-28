@@ -32,9 +32,10 @@ def resolve_mcp_tool_identity(
     """Resolve a host MCP tool name using only supplied configured server IDs.
 
     Exact configured IDs are matched as complete prefixes, so an ID may itself
-    contain ``__`` or ``:``. When several exact prefixes match, the longest
-    configured server ID wins. A hyphen-to-underscore alias is considered only
-    when no exact prefix matches, and only a unique alias resolves.
+    contain ``__`` or ``:``. When several exact prefixes match, the separator
+    boundary that extends furthest wins. Equal boundaries stay ambiguous. A
+    hyphen-to-underscore alias is considered only when no exact prefix matches,
+    and only a unique alias resolves.
     """
 
     form = _host_form(host_tool_name)
@@ -50,7 +51,7 @@ def resolve_mcp_tool_identity(
         separator,
         alias=False,
     )
-    selected = _unique_longest(exact)
+    selected = _unique_furthest_boundary(exact)
     if selected is not None:
         return _resolved(*selected)
     if exact:
@@ -64,7 +65,8 @@ def resolve_mcp_tool_identity(
         alias=True,
     )
     if len(aliases) == 1:
-        return _resolved(*aliases[0])
+        server_id, tool_id, _boundary = aliases[0]
+        return _resolved(server_id, tool_id)
     if len(aliases) > 1:
         return McpIdentityResolution(status="ambiguous")
     return McpIdentityResolution(status="unresolved")
@@ -103,8 +105,8 @@ def _prefix_matches(
     separator: str,
     *,
     alias: bool,
-) -> list[tuple[str, str]]:
-    matches: list[tuple[str, str]] = []
+) -> list[tuple[str, str, int]]:
+    matches: list[tuple[str, str, int]] = []
     for server_id in server_ids:
         observed_id = server_id.replace("-", "_") if alias else server_id
         prefix = f"{marker}{observed_id}{separator}"
@@ -112,20 +114,21 @@ def _prefix_matches(
             continue
         tool_id = host_tool_name[len(prefix) :]
         if _has_non_whitespace(tool_id):
-            matches.append((server_id, tool_id))
+            matches.append((server_id, tool_id, len(prefix)))
     return matches
 
 
-def _unique_longest(
-    matches: Sequence[tuple[str, str]],
+def _unique_furthest_boundary(
+    matches: Sequence[tuple[str, str, int]],
 ) -> tuple[str, str] | None:
     if not matches:
         return None
-    longest = max(len(server_id) for server_id, _tool_id in matches)
-    winners = [match for match in matches if len(match[0]) == longest]
-    if len(winners) == 1:
-        return winners[0]
-    return None
+    furthest = max(boundary for _server_id, _tool_id, boundary in matches)
+    winners = [match for match in matches if match[2] == furthest]
+    if len(winners) != 1:
+        return None
+    server_id, tool_id, _boundary = winners[0]
+    return server_id, tool_id
 
 
 def _resolved(server_id: str, tool_id: str) -> McpIdentityResolution:

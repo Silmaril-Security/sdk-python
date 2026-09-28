@@ -271,6 +271,38 @@ def test_resolver_keeps_nested_tool_id_after_longest_exact_server(
     )
 
 
+@pytest.mark.parametrize(
+    ("host_tool_name", "server_ids", "server_id", "tool_id"),
+    [
+        (
+            "mcp__prod__west__search",
+            ["prod_west_", "prod__west"],
+            "prod__west",
+            "search",
+        ),
+        (
+            "MCP:prod:west:search",
+            ["prod:wes:", "prod:west"],
+            "prod:west",
+            "search",
+        ),
+    ],
+)
+def test_equal_length_ids_follow_the_separator_boundary(
+    host_tool_name,
+    server_ids,
+    server_id,
+    tool_id,
+):
+    resolution = resolve_mcp_tool_identity(host_tool_name, server_ids)
+    assert resolution.status == "resolved"
+    assert resolution.resource == GovernanceResource(
+        kind="mcp_tool",
+        id=tool_id,
+        parent_id=server_id,
+    )
+
+
 def test_resolver_keeps_shorter_exact_prefix_when_longer_id_does_not_match():
     resolution = resolve_mcp_tool_identity(
         "mcp__prod__search",
