@@ -49,13 +49,12 @@ except ImportError as exc:  # pragma: no cover - exercised by packaging consumer
 LOG = logging.getLogger("silmaril_security.sdk.langchain")
 
 # In-flight chat/LLM runs remembered so the matching output can reuse the model.
-# Completed and abandoned runs are removed; the cap drops the oldest if ends never arrive.
-_MAX_TRACKED_MODEL_RUNS = 256
+# End and error remove a run immediately. Retain active runs regardless of duration.
 _MAX_AGENT_MODEL_ID_LENGTH = 256
-# Call selection wins over the constructor, which wins over tracing metadata.
+# Call selection wins over the constructor, which wins over LangChain's tracing model name.
 _INVOCATION_MODEL_KEYS = ("model", "model_name", "model_id")
 _SERIALIZED_MODEL_KEYS = ("model", "model_name", "model_id")
-_METADATA_MODEL_KEYS = ("ls_model_name", "model_name", "model_id", "model")
+_METADATA_MODEL_KEYS = ("ls_model_name",)
 
 
 def _nonempty_model_id(value: Any) -> str | None:
@@ -137,7 +136,7 @@ def _agent_model_metadata(model_id: str | None) -> ClassificationMetadata | None
 
 
 class _RunModelIds:
-    """Bounded run_id -> model id map. Missing and finished runs stay absent."""
+    """run_id -> model id. Finished runs are removed."""
 
     def __init__(self) -> None:
         self._ids: dict[str, str] = {}
@@ -150,8 +149,6 @@ class _RunModelIds:
             if model_id is None:
                 return
             self._ids[key] = model_id
-            while len(self._ids) > _MAX_TRACKED_MODEL_RUNS:
-                del self._ids[next(iter(self._ids))]
 
     def pop(self, run_id: UUID | str) -> str | None:
         with self._lock:

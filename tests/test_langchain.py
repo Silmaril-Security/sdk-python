@@ -15,7 +15,6 @@ from silmaril_security.sdk import (
     HookLabel,
     SilmarilApiError,
 )
-from silmaril_security.sdk.langchain import _MAX_TRACKED_MODEL_RUNS
 
 pytest.importorskip("langchain_core.callbacks")
 
@@ -353,6 +352,11 @@ def test_langchain_handler_sends_selected_agent_model_id(monkeypatch):
         run_id=uuid4(),
         invocation_params={"model": ".".join(class_path)},
     )
+    handler.on_llm_start(
+        serialized={"kwargs": {"model": "m" * 256}},
+        prompts=["max length"],
+        run_id=uuid4(),
+    )
 
     assert [call["hook"] for call in calls[:3]] == [
         HookLabel.USER_INPUT,
@@ -366,6 +370,7 @@ def test_langchain_handler_sends_selected_agent_model_id(monkeypatch):
     assert _agent_model_id(calls[2]["metadata"]) == "gpt-4.1-mini"
     assert _agent_model_id(calls[3]["metadata"]) == "claude-3-5-sonnet"
     assert _agent_model_id(calls[4]["metadata"]) == "gpt-4o"
+    assert _agent_model_id(calls[5]["metadata"]) == "m" * 256
 
 
 def test_langchain_handler_omits_agent_model_id_when_untrustworthy(monkeypatch):
@@ -396,8 +401,21 @@ def test_langchain_handler_omits_agent_model_id_when_untrustworthy(monkeypatch):
         run_id=uuid4(),
         invocation_params={"model": "   ", "model_name": None},
     )
+    handler.on_chat_model_start(
+        serialized={},
+        messages=[[{"role": "user", "content": "app label"}]],
+        run_id=uuid4(),
+        metadata={"model": "my-pipeline", "model_name": "pipeline", "model_id": "pipeline-id"},
+    )
+    handler.on_llm_start(
+        serialized={},
+        prompts=["overlong"],
+        run_id=uuid4(),
+        invocation_params={"model": "m" * 257},
+        metadata={"ls_model_name": "n" * 257},
+    )
 
-    assert [call["metadata"] for call in calls] == [None, None, None]
+    assert [call["metadata"] for call in calls] == [None, None, None, None, None]
 
 
 def test_langchain_handler_keeps_agent_model_id_on_same_run_output(monkeypatch):
@@ -480,11 +498,11 @@ def test_langchain_output_uses_model_recorded_when_start_hook_is_disabled(monkey
     ]
 
 
-def test_langchain_handler_forgets_evicted_run_models(monkeypatch):
+def test_langchain_handler_retains_models_for_many_concurrent_runs(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler(hooks=_MODEL_HOOKS)
     calls = _record_calls(monkeypatch, fw)
-    run_ids = [uuid4() for _ in range(_MAX_TRACKED_MODEL_RUNS + 1)]
+    run_ids = [uuid4() for _ in range(257)]
 
     for index, run_id in enumerate(run_ids):
         handler.on_chat_model_start(
@@ -492,16 +510,17 @@ def test_langchain_handler_forgets_evicted_run_models(monkeypatch):
             messages=[[{"role": "user", "content": "hi"}]],
             run_id=run_id,
         )
+    for run_id in run_ids:
+        handler.on_llm_end(_LLMResult("done"), run_id=run_id)
 
-    handler.on_llm_end(_LLMResult("oldest"), run_id=run_ids[0])
-    handler.on_llm_end(_LLMResult("newest"), run_id=run_ids[-1])
-
-    oldest = [call for call in calls if call["request_id"] == str(run_ids[0])]
-    newest = [call for call in calls if call["request_id"] == str(run_ids[-1])]
-    assert _agent_model_id(oldest[0]["metadata"]) == "model-0"
-    assert _agent_model_id(oldest[1]["metadata"]) is None
-    assert _agent_model_id(newest[0]["metadata"]) == f"model-{_MAX_TRACKED_MODEL_RUNS}"
-    assert _agent_model_id(newest[1]["metadata"]) == f"model-{_MAX_TRACKED_MODEL_RUNS}"
+    by_request = {}
+    for call in calls:
+        by_request.setdefault(call["request_id"], []).append(call)
+    for index, run_id in enumerate(run_ids):
+        start, end = by_request[str(run_id)]
+        assert _agent_model_id(start["metadata"]) == f"model-{index}"
+        assert _agent_model_id(end["metadata"]) == f"model-{index}"
+        assert end["hook"] == HookLabel.LLM_OUTPUT
 
 
 def test_langchain_selected_model_merges_into_request_metadata(monkeypatch):
@@ -588,7 +607,7 @@ async def test_async_langchain_handler_attributes_agent_model_id_per_run(monkeyp
         serialized={"id": class_path, "kwargs": {"model": ".".join(class_path)}},
         messages=[[{"role": "user", "content": "missing"}]],
         run_id=uuid4(),
-        metadata={"model_name": "   "},
+        metadata={"model": "my-pipeline", "model_name": "pipeline", "model_id": "pipeline-id"},
     )
     run_c = uuid4()
     await handler.on_llm_start(
