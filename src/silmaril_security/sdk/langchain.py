@@ -7,6 +7,7 @@ from __future__ import annotations
 import inspect
 import logging
 import threading
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any
 from uuid import UUID, uuid4
@@ -49,7 +50,10 @@ except ImportError as exc:  # pragma: no cover - exercised by packaging consumer
 LOG = logging.getLogger("silmaril_security.sdk.langchain")
 
 # In-flight chat/LLM runs remembered so the matching output can reuse the model.
-# End and error remove a run immediately. Retain active runs regardless of duration.
+# Tradeoff: a successful start still open after 24 hours is treated as abandoned, so its
+# output omits agent_model_id. That age bound is not a concurrency cap: every active run
+# stays attributed until it ends, errors, is cancelled, or actually reaches this age.
+_ABANDONED_MODEL_RUN_TTL_SECONDS = 24 * 60 * 60
 _MAX_AGENT_MODEL_ID_LENGTH = 256
 # Call selection wins over the constructor, which wins over LangChain's tracing model name.
 _INVOCATION_MODEL_KEYS = ("model", "model_name", "model_id")
@@ -136,23 +140,44 @@ def _agent_model_metadata(model_id: str | None) -> ClassificationMetadata | None
 
 
 class _RunModelIds:
-    """run_id -> model id. Finished runs are removed."""
+    """run_id -> model id, ordered from oldest successful start to newest.
+
+    End, error, and a raised or cancelled start remove a run immediately.
+    Successful starts that never finish expire after 24 hours. Pruning walks
+    only the expired prefix, because each remember stamps monotonic time and
+    moves that run to the end.
+    """
 
     def __init__(self) -> None:
-        self._ids: dict[str, str] = {}
+        self._ids: dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()
 
     def remember(self, run_id: UUID | str, model_id: str | None) -> None:
+        now = time.monotonic()
         key = str(run_id)
         with self._lock:
+            self._drop_expired(now)
             self._ids.pop(key, None)
             if model_id is None:
                 return
-            self._ids[key] = model_id
+            self._ids[key] = (model_id, now)
 
     def pop(self, run_id: UUID | str) -> str | None:
+        now = time.monotonic()
         with self._lock:
-            return self._ids.pop(str(run_id), None)
+            self._drop_expired(now)
+            entry = self._ids.pop(str(run_id), None)
+        if entry is None:
+            return None
+        return entry[0]
+
+    def _drop_expired(self, now: float) -> None:
+        while self._ids:
+            key = next(iter(self._ids))
+            _, recorded_at = self._ids[key]
+            if now - recorded_at < _ABANDONED_MODEL_RUN_TTL_SECONDS:
+                return
+            del self._ids[key]
 
 
 class SilmarilFirewallHandler(BaseCallbackHandler):
@@ -272,32 +297,36 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         if FirewallHook.CHAT_MODEL_START not in self._enabled_hooks:
             return
 
-        metadata = _agent_model_metadata(model_id)
-        all_messages: list[Any] = []
-        for batch in messages:
-            all_messages.extend(batch)
+        try:
+            metadata = _agent_model_metadata(model_id)
+            all_messages: list[Any] = []
+            for batch in messages:
+                all_messages.extend(batch)
 
-        text = extract_last_user_text(all_messages)
-        if text:
-            self._classify(
-                text,
-                run_id,
-                FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
-                metadata=metadata,
-            )
+            text = extract_last_user_text(all_messages)
+            if text:
+                self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
+                    metadata=metadata,
+                )
 
-        if self.include_tool:
-            for msg in all_messages:
-                if get_role(msg) in _TOOL_ROLES:
-                    tool_text = extract_content_text(get_content(msg)).strip()
-                    if tool_text:
-                        self._classify(
-                            tool_text,
-                            run_id,
-                            HookLabel.TOOL_RESPONSE,
-                            tool_name=getattr(msg, "name", None),
-                            metadata=metadata,
-                        )
+            if self.include_tool:
+                for msg in all_messages:
+                    if get_role(msg) in _TOOL_ROLES:
+                        tool_text = extract_content_text(get_content(msg)).strip()
+                        if tool_text:
+                            self._classify(
+                                tool_text,
+                                run_id,
+                                HookLabel.TOOL_RESPONSE,
+                                tool_name=getattr(msg, "name", None),
+                                metadata=metadata,
+                            )
+        except BaseException:
+            self._run_models.pop(run_id)
+            raise
 
     def on_llm_start(
         self,
@@ -310,14 +339,18 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         model_id = self._remember_selected_model(serialized, run_id, kwargs)
         if FirewallHook.LLM_START not in self._enabled_hooks:
             return
-        text = extract_text_from_prompts(prompts)
-        if text:
-            self._classify(
-                text,
-                run_id,
-                FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START],
-                metadata=_agent_model_metadata(model_id),
-            )
+        try:
+            text = extract_text_from_prompts(prompts)
+            if text:
+                self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START],
+                    metadata=_agent_model_metadata(model_id),
+                )
+        except BaseException:
+            self._run_models.pop(run_id)
+            raise
 
     def on_tool_start(
         self,
@@ -503,30 +536,34 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         model_id = self._sync_handler._remember_selected_model(serialized, run_id, kwargs)
         if FirewallHook.CHAT_MODEL_START not in self._sync_handler._enabled_hooks:
             return
-        metadata = _agent_model_metadata(model_id)
-        all_messages: list[Any] = []
-        for batch in messages:
-            all_messages.extend(batch)
-        text = extract_last_user_text(all_messages)
-        if text:
-            await self._classify(
-                text,
-                run_id,
-                FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
-                metadata=metadata,
-            )
-        if self._sync_handler.include_tool:
-            for msg in all_messages:
-                if get_role(msg) in _TOOL_ROLES:
-                    tool_text = extract_content_text(get_content(msg)).strip()
-                    if tool_text:
-                        await self._classify(
-                            tool_text,
-                            run_id,
-                            HookLabel.TOOL_RESPONSE,
-                            tool_name=getattr(msg, "name", None),
-                            metadata=metadata,
-                        )
+        try:
+            metadata = _agent_model_metadata(model_id)
+            all_messages: list[Any] = []
+            for batch in messages:
+                all_messages.extend(batch)
+            text = extract_last_user_text(all_messages)
+            if text:
+                await self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
+                    metadata=metadata,
+                )
+            if self._sync_handler.include_tool:
+                for msg in all_messages:
+                    if get_role(msg) in _TOOL_ROLES:
+                        tool_text = extract_content_text(get_content(msg)).strip()
+                        if tool_text:
+                            await self._classify(
+                                tool_text,
+                                run_id,
+                                HookLabel.TOOL_RESPONSE,
+                                tool_name=getattr(msg, "name", None),
+                                metadata=metadata,
+                            )
+        except BaseException:
+            self._sync_handler._run_models.pop(run_id)
+            raise
 
     async def on_llm_start(
         self,
@@ -539,14 +576,18 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         model_id = self._sync_handler._remember_selected_model(serialized, run_id, kwargs)
         if FirewallHook.LLM_START not in self._sync_handler._enabled_hooks:
             return
-        text = extract_text_from_prompts(prompts)
-        if text:
-            await self._classify(
-                text,
-                run_id,
-                FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START],
-                metadata=_agent_model_metadata(model_id),
-            )
+        try:
+            text = extract_text_from_prompts(prompts)
+            if text:
+                await self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START],
+                    metadata=_agent_model_metadata(model_id),
+                )
+        except BaseException:
+            self._sync_handler._run_models.pop(run_id)
+            raise
 
     async def on_tool_start(
         self,

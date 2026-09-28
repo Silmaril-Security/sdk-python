@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,7 @@ from silmaril_security.sdk import (
     HookLabel,
     SilmarilApiError,
 )
+from silmaril_security.sdk.langchain import _ABANDONED_MODEL_RUN_TTL_SECONDS
 
 pytest.importorskip("langchain_core.callbacks")
 
@@ -523,6 +525,138 @@ def test_langchain_handler_retains_models_for_many_concurrent_runs(monkeypatch):
         assert end["hook"] == HookLabel.LLM_OUTPUT
 
 
+def test_langchain_handler_expires_abandoned_starts_after_24_hours(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr("silmaril_security.sdk.langchain.time.monotonic", lambda: clock["now"])
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_langchain_handler(hooks=_MODEL_HOOKS)
+    calls = _record_calls(monkeypatch, fw)
+    abandoned_ids = [uuid4() for _ in range(257)]
+    fresh = uuid4()
+
+    for index, run_id in enumerate(abandoned_ids):
+        handler.on_chat_model_start(
+            serialized={"kwargs": {"model": f"old-{index}"}},
+            messages=[[{"role": "user", "content": "old"}]],
+            run_id=run_id,
+        )
+    clock["now"] = 60.0
+    handler.on_chat_model_start(
+        serialized={"kwargs": {"model": "fresh-model"}},
+        messages=[[{"role": "user", "content": "fresh"}]],
+        run_id=fresh,
+    )
+    clock["now"] = _ABANDONED_MODEL_RUN_TTL_SECONDS + 1
+    handler.on_llm_end(_LLMResult("oldest expired"), run_id=abandoned_ids[0])
+
+    assert str(fresh) in handler._run_models._ids
+    assert str(abandoned_ids[0]) not in handler._run_models._ids
+    assert str(abandoned_ids[-1]) not in handler._run_models._ids
+
+    handler.on_llm_end(_LLMResult("fresh output"), run_id=fresh)
+    handler.on_llm_end(_LLMResult("newest expired"), run_id=abandoned_ids[-1])
+
+    fresh_calls = [call for call in calls if call["request_id"] == str(fresh)]
+    assert [_agent_model_id(call["metadata"]) for call in fresh_calls] == ["fresh-model", "fresh-model"]
+    expired_ends = [
+        call
+        for call in calls
+        if call["request_id"] in {str(abandoned_ids[0]), str(abandoned_ids[-1])}
+        and call["hook"] == HookLabel.LLM_OUTPUT
+    ]
+    assert [call["text"] for call in expired_ends] == ["oldest expired", "newest expired"]
+    assert [_agent_model_id(call["metadata"]) for call in expired_ends] == [None, None]
+
+
+def test_langchain_rejected_start_drops_remembered_model(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_langchain_handler(hooks=_MODEL_HOOKS, fail_open=False)
+    kept = uuid4()
+    blocked = uuid4()
+    rejected = uuid4()
+    cancelled = uuid4()
+    calls = []
+
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
+        calls.append({"text": text, "hook": hook, "metadata": metadata, "request_id": request_id})
+        if text == "blocked":
+            return BlockResult(prediction="MALICIOUS", score=0.9, threshold=0.5, mode="block")
+        if text == "rejected":
+            raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
+        if text == "cancel-me":
+            raise asyncio.CancelledError()
+        return BlockResult(prediction="BENIGN", score=0.1, threshold=0.5, mode=mode or "block")
+
+    monkeypatch.setattr(fw, "_classify_raw", fake_raw)
+    handler.on_chat_model_start(
+        serialized={"kwargs": {"model": "kept-model"}},
+        messages=[[{"role": "user", "content": "kept"}]],
+        run_id=kept,
+    )
+    with pytest.raises(FirewallBlockedException):
+        handler.on_chat_model_start(
+            serialized={"kwargs": {"model": "blocked-model"}},
+            messages=[[{"role": "user", "content": "blocked"}]],
+            run_id=blocked,
+        )
+    with pytest.raises(SilmarilApiError):
+        handler.on_llm_start(
+            serialized={"kwargs": {"model": "rejected-model"}},
+            prompts=["rejected"],
+            run_id=rejected,
+        )
+    with pytest.raises(asyncio.CancelledError):
+        handler.on_llm_start(
+            serialized={"kwargs": {"model": "cancelled-model"}},
+            prompts=["cancel-me"],
+            run_id=cancelled,
+        )
+
+    assert str(blocked) not in handler._run_models._ids
+    assert str(rejected) not in handler._run_models._ids
+    assert str(cancelled) not in handler._run_models._ids
+    assert str(kept) in handler._run_models._ids
+
+    handler.on_llm_end(_LLMResult("kept output"), run_id=kept)
+    handler.on_llm_end(_LLMResult("blocked output"), run_id=blocked)
+    handler.on_llm_end(_LLMResult("rejected output"), run_id=rejected)
+    handler.on_llm_end(_LLMResult("cancelled output"), run_id=cancelled)
+
+    outputs = [call for call in calls if call["hook"] == HookLabel.LLM_OUTPUT]
+    assert [(call["text"], _agent_model_id(call["metadata"])) for call in outputs] == [
+        ("kept output", "kept-model"),
+        ("blocked output", None),
+        ("rejected output", None),
+        ("cancelled output", None),
+    ]
+
+
+def test_langchain_fail_open_start_keeps_model_for_output(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_langchain_handler(hooks=_MODEL_HOOKS)
+    calls = []
+
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
+        calls.append({"text": text, "hook": hook, "metadata": metadata})
+        if hook == HookLabel.USER_INPUT:
+            raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
+        return BlockResult(prediction="BENIGN", score=0.1, threshold=0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", fake_raw)
+    run_id = uuid4()
+    handler.on_chat_model_start(
+        serialized={"kwargs": {"model": "gpt-4o"}},
+        messages=[[{"role": "user", "content": "outage"}]],
+        run_id=run_id,
+    )
+    handler.on_llm_end(_LLMResult("after outage"), run_id=run_id)
+
+    assert [(call["hook"], _agent_model_id(call["metadata"])) for call in calls] == [
+        (HookLabel.USER_INPUT, "gpt-4o"),
+        (HookLabel.LLM_OUTPUT, "gpt-4o"),
+    ]
+
+
 def test_langchain_selected_model_merges_into_request_metadata(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler(hooks=[FirewallHook.CHAT_MODEL_START, FirewallHook.LLM_END])
@@ -557,6 +691,94 @@ def test_langchain_selected_model_merges_into_request_metadata(monkeypatch):
         assert payload["metadata"]["silmaril"]["sdk_language"] == "python"
         assert payload["metadata"]["silmaril"]["request_id"] == str(run_id)
     assert "agent_model_id" not in payloads[2]["metadata"]["silmaril"]
+
+
+@pytest.mark.asyncio
+async def test_async_langchain_cancelled_or_blocked_start_drops_run_model(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_async_langchain_handler(hooks=_MODEL_HOOKS)
+    calls = []
+
+    async def fake_async_raw(
+        firewall,
+        text,
+        *,
+        hook=None,
+        tool_name=None,
+        request_id=None,
+        mode=None,
+        metadata=None,
+    ):
+        calls.append({"text": text, "hook": hook, "metadata": metadata, "request_id": request_id})
+        if text == "cancel-me":
+            raise asyncio.CancelledError()
+        if text == "blocked":
+            return BlockResult(prediction="MALICIOUS", score=0.9, threshold=0.5, mode="block")
+        return BlockResult(prediction="BENIGN", score=0.1, threshold=0.5, mode=mode or "block")
+
+    monkeypatch.setattr("silmaril_security.sdk.langchain._async_classify_raw", fake_async_raw)
+    kept = uuid4()
+    cancelled = uuid4()
+    blocked = uuid4()
+
+    await handler.on_chat_model_start(
+        serialized={"kwargs": {"model": "kept-model"}},
+        messages=[[{"role": "user", "content": "kept"}]],
+        run_id=kept,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await handler.on_chat_model_start(
+            serialized={"kwargs": {"model": "cancelled-model"}},
+            messages=[[{"role": "user", "content": "cancel-me"}]],
+            run_id=cancelled,
+        )
+    with pytest.raises(FirewallBlockedException):
+        await handler.on_llm_start(
+            serialized={"kwargs": {"model": "blocked-model"}},
+            prompts=["blocked"],
+            run_id=blocked,
+        )
+
+    tracked = handler._sync_handler._run_models._ids
+    assert str(cancelled) not in tracked
+    assert str(blocked) not in tracked
+    assert str(kept) in tracked
+
+    await handler.on_llm_end(_LLMResult("kept output"), run_id=kept)
+    await handler.on_llm_end(_LLMResult("cancelled output"), run_id=cancelled)
+    await handler.on_llm_end(_LLMResult("blocked output"), run_id=blocked)
+
+    outputs = [call for call in calls if call["hook"] == HookLabel.LLM_OUTPUT]
+    assert [(call["text"], _agent_model_id(call["metadata"])) for call in outputs] == [
+        ("kept output", "kept-model"),
+        ("cancelled output", None),
+        ("blocked output", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_langchain_task_cancellation_while_classifying_drops_run_model(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    handler = fw.as_async_langchain_handler(hooks=_MODEL_HOOKS)
+    entered = asyncio.Event()
+
+    async def pending_classification(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("silmaril_security.sdk.langchain._async_classify_raw", pending_classification)
+    run_id = uuid4()
+    task = asyncio.create_task(handler.on_llm_start(
+        serialized={"kwargs": {"model": "provider/model-a"}},
+        prompts=["pending"],
+        run_id=run_id,
+    ))
+    await entered.wait()
+    assert str(run_id) in handler._sync_handler._run_models._ids
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert str(run_id) not in handler._sync_handler._run_models._ids
 
 
 @pytest.mark.asyncio
