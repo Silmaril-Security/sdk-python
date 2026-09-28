@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+import threading
+import time
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -47,6 +49,136 @@ except ImportError as exc:  # pragma: no cover - exercised by packaging consumer
 
 LOG = logging.getLogger("silmaril_security.sdk.langchain")
 
+# In-flight chat/LLM runs remembered so the matching output can reuse the model.
+# Tradeoff: a successful start still open after 24 hours is treated as abandoned, so its
+# output omits agent_model_id. That age bound is not a concurrency cap: every active run
+# stays attributed until it ends, errors, is cancelled, or actually reaches this age.
+_ABANDONED_MODEL_RUN_TTL_SECONDS = 24 * 60 * 60
+_MAX_AGENT_MODEL_ID_LENGTH = 256
+# Call selection wins over the constructor, which wins over LangChain's tracing model name.
+_INVOCATION_MODEL_KEYS = ("model", "model_name", "model_id")
+_SERIALIZED_MODEL_KEYS = ("model", "model_name", "model_id")
+_METADATA_MODEL_KEYS = ("ls_model_name",)
+
+
+def _nonempty_model_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    model_id = value.strip()
+    if not model_id or len(model_id) > _MAX_AGENT_MODEL_ID_LENGTH:
+        return None
+    if any(ord(char) < 32 for char in model_id):
+        return None
+    return model_id
+
+
+def _serialized_class_paths(serialized: Any) -> set[str]:
+    """Class-path identities that must not be reported as a selected model."""
+    if not isinstance(serialized, Mapping):
+        return set()
+    raw_id = serialized.get("id")
+    paths: set[str] = set()
+    if isinstance(raw_id, str):
+        stripped = raw_id.strip()
+        if stripped:
+            paths.add(stripped)
+        return paths
+    if isinstance(raw_id, Sequence) and not isinstance(raw_id, (str, bytes)):
+        parts = [part.strip() for part in raw_id if isinstance(part, str) and part.strip()]
+        if parts:
+            paths.add(".".join(parts))
+            paths.add("/".join(parts))
+    return paths
+
+
+def _model_id_from_mapping(
+    mapping: Any,
+    keys: tuple[str, ...],
+    *,
+    class_paths: set[str],
+) -> str | None:
+    if not isinstance(mapping, Mapping):
+        return None
+    for key in keys:
+        model_id = _nonempty_model_id(mapping.get(key))
+        if model_id is None or model_id in class_paths:
+            continue
+        return model_id
+    return None
+
+
+def _selected_agent_model_id(serialized: Any, callback_kwargs: Mapping[str, Any]) -> str | None:
+    """Return the model selected for this callback, or None when it is not trustworthy."""
+    class_paths = _serialized_class_paths(serialized)
+    invocation_params = callback_kwargs.get("invocation_params")
+    model_id = _model_id_from_mapping(
+        invocation_params,
+        _INVOCATION_MODEL_KEYS,
+        class_paths=class_paths,
+    )
+    if model_id is not None:
+        return model_id
+    serialized_kwargs = serialized.get("kwargs") if isinstance(serialized, Mapping) else None
+    model_id = _model_id_from_mapping(
+        serialized_kwargs,
+        _SERIALIZED_MODEL_KEYS,
+        class_paths=class_paths,
+    )
+    if model_id is not None:
+        return model_id
+    return _model_id_from_mapping(
+        callback_kwargs.get("metadata"),
+        _METADATA_MODEL_KEYS,
+        class_paths=class_paths,
+    )
+
+
+def _agent_model_metadata(model_id: str | None) -> ClassificationMetadata | None:
+    if model_id is None:
+        return None
+    return {"silmaril": {"agent_model_id": model_id}}
+
+
+class _RunModelIds:
+    """run_id -> model id, ordered from oldest successful start to newest.
+
+    End, error, and a raised or cancelled start remove a run immediately.
+    Successful starts that never finish expire after 24 hours. Pruning walks
+    only the expired prefix, because each remember stamps monotonic time and
+    moves that run to the end.
+    """
+
+    def __init__(self) -> None:
+        self._ids: dict[str, tuple[str, float]] = {}
+        self._lock = threading.Lock()
+
+    def remember(self, run_id: UUID | str, model_id: str | None) -> None:
+        now = time.monotonic()
+        key = str(run_id)
+        with self._lock:
+            self._drop_expired(now)
+            self._ids.pop(key, None)
+            if model_id is None:
+                return
+            self._ids[key] = (model_id, now)
+
+    def pop(self, run_id: UUID | str) -> str | None:
+        now = time.monotonic()
+        with self._lock:
+            self._drop_expired(now)
+            entry = self._ids.pop(str(run_id), None)
+        if entry is None:
+            return None
+        return entry[0]
+
+    def _drop_expired(self, now: float) -> None:
+        while self._ids:
+            key = next(iter(self._ids))
+            _, recorded_at = self._ids[key]
+            if now - recorded_at < _ABANDONED_MODEL_RUN_TTL_SECONDS:
+                return
+            del self._ids[key]
+
 
 class SilmarilFirewallHandler(BaseCallbackHandler):
     """Synchronous LangChain callback handler.
@@ -81,6 +213,17 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         self.shadow_mode = self.mode == "shadow"
         self.on_classify = on_classify
         self.logger = logger or LOG
+        self._run_models = _RunModelIds()
+
+    def _remember_selected_model(
+        self,
+        serialized: Any,
+        run_id: UUID | str,
+        callback_kwargs: Mapping[str, Any],
+    ) -> str | None:
+        model_id = _selected_agent_model_id(serialized, callback_kwargs)
+        self._run_models.remember(run_id, model_id)
+        return model_id
 
     def _fire_on_classify(self, event: ClassifyEvent) -> None:
         if self.on_classify is None:
@@ -96,14 +239,19 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         run_id: UUID | str,
         hook_label: HookLabel,
         tool_name: str | None = None,
+        metadata: ClassificationMetadata | None = None,
     ) -> None:
         try:
+            request: dict[str, Any] = {}
+            if metadata is not None:
+                request["metadata"] = metadata
             result = self.firewall._classify_raw(
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
                 request_id=str(run_id),
                 mode=self.mode,
+                **request,
             )
         except Exception:
             if not self.fail_open:
@@ -145,32 +293,40 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        model_id = self._remember_selected_model(serialized, run_id, kwargs)
         if FirewallHook.CHAT_MODEL_START not in self._enabled_hooks:
             return
 
-        all_messages: list[Any] = []
-        for batch in messages:
-            all_messages.extend(batch)
+        try:
+            metadata = _agent_model_metadata(model_id)
+            all_messages: list[Any] = []
+            for batch in messages:
+                all_messages.extend(batch)
 
-        text = extract_last_user_text(all_messages)
-        if text:
-            self._classify(
-                text,
-                run_id,
-                FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
-            )
+            text = extract_last_user_text(all_messages)
+            if text:
+                self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
+                    metadata=metadata,
+                )
 
-        if self.include_tool:
-            for msg in all_messages:
-                if get_role(msg) in _TOOL_ROLES:
-                    tool_text = extract_content_text(get_content(msg)).strip()
-                    if tool_text:
-                        self._classify(
-                            tool_text,
-                            run_id,
-                            HookLabel.TOOL_RESPONSE,
-                            tool_name=getattr(msg, "name", None),
-                        )
+            if self.include_tool:
+                for msg in all_messages:
+                    if get_role(msg) in _TOOL_ROLES:
+                        tool_text = extract_content_text(get_content(msg)).strip()
+                        if tool_text:
+                            self._classify(
+                                tool_text,
+                                run_id,
+                                HookLabel.TOOL_RESPONSE,
+                                tool_name=getattr(msg, "name", None),
+                                metadata=metadata,
+                            )
+        except BaseException:
+            self._run_models.pop(run_id)
+            raise
 
     def on_llm_start(
         self,
@@ -180,11 +336,21 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        model_id = self._remember_selected_model(serialized, run_id, kwargs)
         if FirewallHook.LLM_START not in self._enabled_hooks:
             return
-        text = extract_text_from_prompts(prompts)
-        if text:
-            self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START])
+        try:
+            text = extract_text_from_prompts(prompts)
+            if text:
+                self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START],
+                    metadata=_agent_model_metadata(model_id),
+                )
+        except BaseException:
+            self._run_models.pop(run_id)
+            raise
 
     def on_tool_start(
         self,
@@ -220,11 +386,21 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.RETRIEVER_START])
 
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        model_id = self._run_models.pop(run_id)
         if FirewallHook.LLM_END not in self._enabled_hooks:
             return
         text = extract_text_from_llm_result(response)
         if text:
-            self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END])
+            self._classify(
+                text,
+                run_id,
+                FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END],
+                metadata=_agent_model_metadata(model_id),
+            )
+
+    def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        del error, kwargs
+        self._run_models.pop(run_id)
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         if FirewallHook.TOOL_END not in self._enabled_hooks:
@@ -302,8 +478,12 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         run_id: UUID | str,
         hook_label: HookLabel,
         tool_name: str | None = None,
+        metadata: ClassificationMetadata | None = None,
     ) -> None:
         try:
+            request: dict[str, Any] = {}
+            if metadata is not None:
+                request["metadata"] = metadata
             result = await _async_classify_raw(
                 self._sync_handler.firewall,
                 text,
@@ -311,6 +491,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
                 tool_name=tool_name,
                 request_id=str(run_id),
                 mode=self._sync_handler.mode,
+                **request,
             )
         except Exception:
             if not self._sync_handler.fail_open:
@@ -352,25 +533,37 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        model_id = self._sync_handler._remember_selected_model(serialized, run_id, kwargs)
         if FirewallHook.CHAT_MODEL_START not in self._sync_handler._enabled_hooks:
             return
-        all_messages: list[Any] = []
-        for batch in messages:
-            all_messages.extend(batch)
-        text = extract_last_user_text(all_messages)
-        if text:
-            await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START])
-        if self._sync_handler.include_tool:
-            for msg in all_messages:
-                if get_role(msg) in _TOOL_ROLES:
-                    tool_text = extract_content_text(get_content(msg)).strip()
-                    if tool_text:
-                        await self._classify(
-                            tool_text,
-                            run_id,
-                            HookLabel.TOOL_RESPONSE,
-                            tool_name=getattr(msg, "name", None),
-                        )
+        try:
+            metadata = _agent_model_metadata(model_id)
+            all_messages: list[Any] = []
+            for batch in messages:
+                all_messages.extend(batch)
+            text = extract_last_user_text(all_messages)
+            if text:
+                await self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
+                    metadata=metadata,
+                )
+            if self._sync_handler.include_tool:
+                for msg in all_messages:
+                    if get_role(msg) in _TOOL_ROLES:
+                        tool_text = extract_content_text(get_content(msg)).strip()
+                        if tool_text:
+                            await self._classify(
+                                tool_text,
+                                run_id,
+                                HookLabel.TOOL_RESPONSE,
+                                tool_name=getattr(msg, "name", None),
+                                metadata=metadata,
+                            )
+        except BaseException:
+            self._sync_handler._run_models.pop(run_id)
+            raise
 
     async def on_llm_start(
         self,
@@ -380,11 +573,21 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        model_id = self._sync_handler._remember_selected_model(serialized, run_id, kwargs)
         if FirewallHook.LLM_START not in self._sync_handler._enabled_hooks:
             return
-        text = extract_text_from_prompts(prompts)
-        if text:
-            await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START])
+        try:
+            text = extract_text_from_prompts(prompts)
+            if text:
+                await self._classify(
+                    text,
+                    run_id,
+                    FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_START],
+                    metadata=_agent_model_metadata(model_id),
+                )
+        except BaseException:
+            self._sync_handler._run_models.pop(run_id)
+            raise
 
     async def on_tool_start(
         self,
@@ -420,11 +623,21 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.RETRIEVER_START])
 
     async def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        model_id = self._sync_handler._run_models.pop(run_id)
         if FirewallHook.LLM_END not in self._sync_handler._enabled_hooks:
             return
         text = extract_text_from_llm_result(response)
         if text:
-            await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END])
+            await self._classify(
+                text,
+                run_id,
+                FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END],
+                metadata=_agent_model_metadata(model_id),
+            )
+
+    async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        del error, kwargs
+        self._sync_handler._run_models.pop(run_id)
 
     async def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         if FirewallHook.TOOL_END not in self._sync_handler._enabled_hooks:

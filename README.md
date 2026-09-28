@@ -371,6 +371,8 @@ diagnostics and remain stateless. Exact `metadata.conversationId` is preserved
 as the backend sequence identity. No aliases are inspected. If callers provide
 `metadata["silmaril"]`, it must be an object and SDK-reserved keys are
 overwritten by the SDK.
+Set `metadata["silmaril"]["agent_model_id"]` to the agent's selected model ID
+when known. Batch metadata can carry a different ID for each text.
 
 Batch calls accept one metadata object per text. The metadata list must match
 the number of texts; use `None` for entries without metadata:
