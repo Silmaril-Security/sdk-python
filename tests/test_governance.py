@@ -88,6 +88,29 @@ def test_vendored_contract_digest_and_concrete_resource_vectors():
     }
 
 
+def test_mcp_dispatch_contract_cases():
+    vectors = json.loads((CONTRACT_DIR / "matching.json").read_text())
+    for case in vectors["mcp_dispatch_cases"]:
+        catalog = case["catalog"]
+        resolution = resolve_mcp_tool_identity(
+            case["raw_name"],
+            catalog["servers"],
+            catalog.get("tools"),
+            authoritative_resource=case.get("authoritative_resource"),
+        )
+        if case["failure"] is None:
+            expected = case["result"]
+            assert resolution.status == "resolved", case["name"]
+            assert resolution.resource == GovernanceResource(
+                kind=expected["kind"],
+                id=expected["id"],
+                parent_id=expected.get("parent_id"),
+            ), case["name"]
+        else:
+            assert resolution.status == case["failure"], case["name"]
+            assert resolution.resource is None, case["name"]
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -115,7 +138,10 @@ def test_malformed_concrete_resources_are_rejected(value):
 def test_resolver_supports_both_host_forms_and_unique_normalized_alias(
     host_tool_name,
 ):
-    alias = resolve_mcp_tool_identity(host_tool_name, ["silmaril-firewall"])
+    alias = resolve_mcp_tool_identity(
+        host_tool_name,
+        [{"id": "silmaril-firewall", "aliases": ["silmaril_firewall"]}],
+    )
     assert alias.status == "resolved"
     assert alias.resource == GovernanceResource(
         kind="mcp_tool", id="list", parent_id="silmaril-firewall"
@@ -129,14 +155,16 @@ def test_resolver_supports_both_host_forms_and_unique_normalized_alias(
         "MCP:silmaril_firewall:list",
     ],
 )
-def test_resolver_prefers_exact_configured_server(host_tool_name):
-    exact = resolve_mcp_tool_identity(
-        host_tool_name, ["silmaril-firewall", "silmaril_firewall"]
+def test_resolver_reports_exact_and_alias_servers_as_ambiguous(host_tool_name):
+    resolution = resolve_mcp_tool_identity(
+        host_tool_name,
+        [
+            {"id": "silmaril-firewall", "aliases": ["silmaril_firewall"]},
+            "silmaril_firewall",
+        ],
     )
-    assert exact.status == "resolved"
-    assert exact.resource == GovernanceResource(
-        kind="mcp_tool", id="list", parent_id="silmaril_firewall"
-    )
+    assert resolution.status == "ambiguous"
+    assert resolution.resource is None
 
 
 
@@ -146,7 +174,11 @@ def test_resolver_prefers_exact_configured_server(host_tool_name):
 )
 def test_resolver_reports_normalized_alias_collisions(host_tool_name):
     resolution = resolve_mcp_tool_identity(
-        host_tool_name, ["a-b_c", "a_b-c"]
+        host_tool_name,
+        [
+            {"id": "a-b_c", "aliases": ["a_b_c"]},
+            {"id": "a_b-c", "aliases": ["a_b_c"]},
+        ],
     )
     assert resolution.status == "ambiguous"
     assert resolution.resource is None
@@ -201,106 +233,36 @@ def test_resolver_keeps_separator_ids_authoritative(host_tool_name, server_id):
 
 
 @pytest.mark.parametrize(
-    ("host_tool_name", "server_ids", "server_id", "tool_id"),
+    ("host_tool_name", "server_id", "tool_id"),
     [
-        (
-            "mcp__prod__west__search",
-            ["prod", "prod__west"],
-            "prod__west",
-            "search",
-        ),
-        (
-            "MCP:prod:west:search",
-            ["prod", "prod:west"],
-            "prod:west",
-            "search",
-        ),
-        (
-            "mcp__prod__west__edge__search",
-            ["prod", "prod__west", "prod__west__edge"],
-            "prod__west__edge",
-            "search",
-        ),
+        ("mcp__a__b__c", "a", "b__c"),
+        ("MCP:a:b:c", "a", "b:c"),
+        ("mcp__prod__west__edge__search", "prod__west", "edge__search"),
     ],
 )
-def test_resolver_prefers_longest_exact_configured_prefix(
-    host_tool_name,
-    server_ids,
-    server_id,
-    tool_id,
-):
+def test_unique_server_prefix_keeps_nested_tool_id(host_tool_name, server_id, tool_id):
+    resolution = resolve_mcp_tool_identity(host_tool_name, [server_id])
+    assert resolution.status == "resolved"
+    assert resolution.resource == GovernanceResource(
+        kind="mcp_tool",
+        id=tool_id,
+        parent_id=server_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("host_tool_name", "server_ids"),
+    [
+        ("mcp__a__b__c", ["a", "a__b"]),
+        ("MCP:a:b:c", ["a", "a:b"]),
+        ("mcp__prod__west__search", ["prod", "prod__west"]),
+    ],
+)
+def test_overlapping_server_prefixes_are_ambiguous(host_tool_name, server_ids):
     for configured_ids in (server_ids, list(reversed(server_ids))):
         resolution = resolve_mcp_tool_identity(host_tool_name, configured_ids)
-        assert resolution.status == "resolved"
-        assert resolution.resource == GovernanceResource(
-            kind="mcp_tool",
-            id=tool_id,
-            parent_id=server_id,
-        )
-
-
-@pytest.mark.parametrize(
-    ("host_tool_name", "server_ids", "server_id", "tool_id"),
-    [
-        (
-            "mcp__prod__west__edge__search",
-            ["prod", "prod__west"],
-            "prod__west",
-            "edge__search",
-        ),
-        (
-            "MCP:prod:west:edge:search",
-            ["prod", "prod:west"],
-            "prod:west",
-            "edge:search",
-        ),
-    ],
-)
-def test_resolver_keeps_nested_tool_id_after_longest_exact_server(
-    host_tool_name,
-    server_ids,
-    server_id,
-    tool_id,
-):
-    resolution = resolve_mcp_tool_identity(host_tool_name, server_ids)
-    assert resolution.status == "resolved"
-    assert resolution.resource == GovernanceResource(
-        kind="mcp_tool",
-        id=tool_id,
-        parent_id=server_id,
-    )
-
-
-@pytest.mark.parametrize(
-    ("host_tool_name", "server_ids", "server_id", "tool_id"),
-    [
-        (
-            "mcp__prod__west__search",
-            ["prod_west_", "prod__west"],
-            "prod__west",
-            "search",
-        ),
-        (
-            "MCP:prod:west:search",
-            ["prod:wes:", "prod:west"],
-            "prod:west",
-            "search",
-        ),
-    ],
-)
-def test_equal_length_ids_follow_the_separator_boundary(
-    host_tool_name,
-    server_ids,
-    server_id,
-    tool_id,
-):
-    resolution = resolve_mcp_tool_identity(host_tool_name, server_ids)
-    assert resolution.status == "resolved"
-    assert resolution.resource == GovernanceResource(
-        kind="mcp_tool",
-        id=tool_id,
-        parent_id=server_id,
-    )
+        assert resolution.status == "ambiguous"
+        assert resolution.resource is None
 
 
 def test_resolver_keeps_shorter_exact_prefix_when_longer_id_does_not_match():
@@ -316,27 +278,35 @@ def test_resolver_keeps_shorter_exact_prefix_when_longer_id_does_not_match():
     )
 
 
-def test_resolver_prefers_exact_separator_prefix_over_alias_collision():
-    resolved = resolve_mcp_tool_identity(
+def test_exact_and_alias_prefixes_are_ambiguous():
+    collision = resolve_mcp_tool_identity(
+        "mcp__prod_west__search",
+        ["prod_west", {"id": "prod-west", "aliases": ["prod_west"]}],
+    )
+    assert collision.status == "ambiguous"
+    assert collision.resource is None
+    separator_alias = resolve_mcp_tool_identity(
         "mcp__prod__west__search",
-        ["prod__west", "prod-_west"],
+        ["prod__west", {"id": "prod-_west", "aliases": ["prod__west"]}],
     )
-    assert resolved.status == "resolved"
-    assert resolved.resource == GovernanceResource(
-        kind="mcp_tool",
-        id="search",
-        parent_id="prod__west",
-    )
+    assert separator_alias.status == "ambiguous"
+    assert separator_alias.resource is None
 
     collision = resolve_mcp_tool_identity(
         "mcp__a_b__c__list",
-        ["a-b__c", "a-b-_c"],
+        [
+            {"id": "a-b__c", "aliases": ["a_b__c"]},
+            {"id": "a-b-_c", "aliases": ["a_b__c"]},
+        ],
     )
     assert collision.status == "ambiguous"
     assert collision.resource is None
     colon_collision = resolve_mcp_tool_identity(
         "MCP:a_b:c_d:list",
-        ["a-b:c_d", "a-b:c-d"],
+        [
+            {"id": "a-b:c_d", "aliases": ["a_b:c_d"]},
+            {"id": "a-b:c-d", "aliases": ["a_b:c_d"]},
+        ],
     )
     assert colon_collision.status == "ambiguous"
     assert colon_collision.resource is None
@@ -361,6 +331,43 @@ def test_resolver_rejects_malformed_newline_and_long_names(host_tool_name):
         ["prod__west", "prod:west", "prod\nwest", "a"],
     )
     assert resolution.status == "unresolved"
+    assert resolution.resource is None
+
+
+def test_tool_catalog_matches_complete_spellings_and_dedupes():
+    tool = {"id": "b__c", "parent_id": "a"}
+    resolved = resolve_mcp_tool_identity(
+        "mcp__a__b__c",
+        ["a"],
+        [tool, tool],
+    )
+    assert resolved.status == "resolved"
+    assert resolved.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="b__c",
+        parent_id="a",
+    )
+    shorter = resolve_mcp_tool_identity(
+        "mcp__a__b__c",
+        ["a", "a__b"],
+        [{"id": "b", "parent_id": "a"}],
+    )
+    assert shorter.status == "unresolved"
+    assert shorter.resource is None
+    missing = resolve_mcp_tool_identity("mcp__a__b", ["a"], [])
+    assert missing.status == "unresolved"
+
+
+def test_tool_catalog_exact_and_alias_spellings_are_ambiguous():
+    resolution = resolve_mcp_tool_identity(
+        "MCP:prod_west:search",
+        [{"id": "prod-west", "aliases": ["prod_west"]}, "prod_west"],
+        [
+            {"id": "search", "parent_id": "prod-west"},
+            {"id": "search", "parent_id": "prod_west"},
+        ],
+    )
+    assert resolution.status == "ambiguous"
     assert resolution.resource is None
 
 

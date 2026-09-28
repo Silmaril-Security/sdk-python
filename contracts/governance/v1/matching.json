@@ -391,5 +391,290 @@
       },
       "matches": false
     }
+  ],
+  "mcp_dispatch_cases": [
+    {
+      "name": "unique exact",
+      "raw_name": "mcp__git_hub__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git_hub"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "git_hub"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "git_hub"
+      },
+      "failure": null
+    },
+    {
+      "name": "unique alias",
+      "raw_name": "mcp__git_hub__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git-hub",
+            "aliases": [
+              "git_hub"
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "git-hub"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "git-hub"
+      },
+      "failure": null
+    },
+    {
+      "name": "exact/alias collision",
+      "raw_name": "mcp__git_hub__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git-hub",
+            "aliases": [
+              "git_hub"
+            ]
+          },
+          {
+            "id": "git_hub"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "git-hub"
+          },
+          {
+            "id": "search",
+            "parent_id": "git_hub"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "ambiguous"
+    },
+    {
+      "name": "id containing __",
+      "raw_name": "mcp__my__server__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "my__server"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "my__server"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "my__server"
+      },
+      "failure": null
+    },
+    {
+      "name": "id containing :",
+      "raw_name": "MCP:org:repo:search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "org:repo"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "org:repo"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "org:repo"
+      },
+      "failure": null
+    },
+    {
+      "name": "overlapping separator interpretations",
+      "raw_name": "mcp__a__b__c",
+      "catalog": {
+        "servers": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "a__b"
+          }
+        ],
+        "tools": [
+          {
+            "id": "b__c",
+            "parent_id": "a"
+          },
+          {
+            "id": "c",
+            "parent_id": "a__b"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "ambiguous"
+    },
+    {
+      "name": "unknown",
+      "raw_name": "mcp__other__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git_hub"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "git_hub"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "unresolved"
+    },
+    {
+      "name": "tool name with delimiter",
+      "raw_name": "mcp__git__search__all",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search__all",
+            "parent_id": "git"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search__all",
+        "parent_id": "git"
+      },
+      "failure": null
+    },
+    {
+      "name": "server ids only tool id containing __",
+      "raw_name": "mcp__git__search__all",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search__all",
+        "parent_id": "git"
+      },
+      "failure": null
+    },
+    {
+      "name": "server ids only tool id containing :",
+      "raw_name": "MCP:org:search:all",
+      "catalog": {
+        "servers": [
+          {
+            "id": "org"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search:all",
+        "parent_id": "org"
+      },
+      "failure": null
+    },
+    {
+      "name": "server ids only overlapping prefixes",
+      "raw_name": "mcp__git__hub__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "git-hub",
+            "aliases": [
+              "git"
+            ]
+          },
+          {
+            "id": "git__hub"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "ambiguous"
+    },
+    {
+      "name": "typed resource authoritative",
+      "raw_name": "mcp__git_hub__search",
+      "authoritative_resource": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "git-hub"
+      },
+      "catalog": {
+        "servers": [
+          {
+            "id": "git-hub",
+            "aliases": [
+              "git_hub"
+            ]
+          },
+          {
+            "id": "git_hub"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "git-hub"
+          },
+          {
+            "id": "search",
+            "parent_id": "git_hub"
+          }
+        ]
+      },
+      "result": {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "git-hub"
+      },
+      "failure": null
+    }
   ]
 }

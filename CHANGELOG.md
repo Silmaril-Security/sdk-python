@@ -13,9 +13,10 @@ All notable changes to the Silmaril Firewall Python SDK are documented here.
 - Enforce governance Block decisions even when threat classification is
   benign, while preserving explicit Shadow and Warn behavior in direct,
   callback, batch, async, and LangChain flows.
-- Add an MCP tool identity resolver that uses only supplied configured server
-  IDs, preferring exact IDs before unique normalized host aliases and
-  reporting unresolved or ambiguous identities explicitly.
+- Add an MCP raw-name resolver. Server-only catalogs keep the entire
+  remaining tool ID after every configured server or alias prefix. A tool
+  catalog matches complete server and tool spellings. One distinct canonical
+  ref resolves; exact and alias collisions stay ambiguous.
 - Pin the isolated Hatchling build backend to the supported 1.27 release line
   so release artifacts use Core Metadata 2.4 accepted by the package checks.
 
