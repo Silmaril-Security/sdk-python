@@ -23,7 +23,7 @@ from silmaril_security.sdk._utils import (
 )
 from silmaril_security.sdk.async_firewall import AsyncFirewall
 from silmaril_security.sdk.exceptions import FirewallBlockedException
-from silmaril_security.sdk.firewall import Firewall
+from silmaril_security.sdk.firewall import Firewall, _is_blocked_result
 from silmaril_security.sdk.hooks import (
     FIREWALL_HOOK_TO_LABEL,
     FirewallHook,
@@ -114,7 +114,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             )
             return
 
-        blocked = result.prediction == "MALICIOUS"
+        blocked = _is_blocked_result(result)
         effective_mode = self.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,
@@ -321,7 +321,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             )
             return
 
-        blocked = result.prediction == "MALICIOUS"
+        blocked = _is_blocked_result(result)
         effective_mode = self._sync_handler.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,

@@ -40,8 +40,44 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.6.1
+pip install silmaril-security-sdk==0.7.0
 ```
+
+Deploy a Firewall reader that can accept governance resource identity before
+using 0.7.0. The reader must be capable of runtime schema 6. Installing this
+SDK does not activate schema 6.
+
+```python
+import os
+
+from silmaril_security.sdk import Firewall, HookLabel, resolve_mcp_tool_identity
+
+resolution = resolve_mcp_tool_identity(
+    "mcp__arxiv_mcp_server__search",
+    ["arxiv-mcp-server"],
+)
+resource = resolution.resource
+if resolution.status != "resolved" or resource is None:
+    raise RuntimeError("MCP identity is not resolved")
+catalog_snapshot_id = os.environ["SILMARIL_MCP_CATALOG_REVISION"]
+fw = Firewall(
+    api_key=os.environ["SILMARIL_API_KEY"],
+    api_url=os.environ["SILMARIL_API_URL"],
+)
+fw.classify(
+    "query the paper catalog",
+    hook=HookLabel.TOOL_CALL,
+    tool_name="mcp__arxiv_mcp_server__search",
+    resource=resource,
+    identity_revision=catalog_snapshot_id,
+)
+```
+
+This catalog resolves to
+`GovernanceResource(kind="mcp_tool", id="search", parent_id="arxiv-mcp-server")`.
+The host sets `SILMARIL_MCP_CATALOG_REVISION` to the trusted snapshot revision
+that supplied this server catalog. In Block mode, classify an MCP call only
+after identity resolves to that resource and revision.
 
 Use a GitHub branch install only when you intentionally want the current branch
 tip:

@@ -33,6 +33,8 @@ from silmaril_security.sdk.types import (
     ClassificationMetadata,
     ClassifyEvent,
     FirewallMode,
+    GovernanceDecision,
+    GovernanceResource,
 )
 
 LOG = logging.getLogger("silmaril_security.sdk")
@@ -95,6 +97,7 @@ def _block_result_from_json(
     if prediction not in ("BENIGN", "MALICIOUS"):
         raise ValueError(f"Firewall: invalid prediction {prediction!r}")
     primary_raw = data.get("primary_outcome")
+    governance_raw = data.get("governance")
     return BlockResult(
         prediction=prediction,
         score=score,
@@ -112,6 +115,75 @@ def _block_result_from_json(
         detector_counts=normalize_harmful_outcome_int_map(
             data.get("detector_counts"), "detector_counts"
         ),
+        governance=(
+            _governance_decision_from_json(governance_raw)
+            if governance_raw is not None
+            else None
+        ),
+    )
+
+
+def _governance_decision_from_json(value: object) -> GovernanceDecision:
+    if not isinstance(value, Mapping):
+        raise ValueError("Firewall: response governance must be an object")
+    action = value.get("action")
+    if action not in ("allow", "block"):
+        raise ValueError("Firewall: response governance action must be allow or block")
+    policy_version = value.get("policy_version")
+    if not isinstance(policy_version, str) or not policy_version:
+        raise ValueError(
+            "Firewall: response governance policy_version must be a non-empty string"
+        )
+    rule_id = value.get("rule_id")
+    if rule_id is not None and not isinstance(rule_id, str):
+        raise ValueError(
+            "Firewall: response governance rule_id must be a string when provided"
+        )
+    identity_revision = value.get("identity_revision")
+    if identity_revision is not None and (
+        not isinstance(identity_revision, str) or not identity_revision
+    ):
+        raise ValueError(
+            "Firewall: response governance identity_revision must be a non-empty string"
+        )
+    reason = value.get("reason")
+    if reason is not None and reason != "identity_unresolved":
+        raise ValueError(
+            "Firewall: response governance reason must be identity_unresolved when provided"
+        )
+    resource_raw = value.get("resource")
+    return GovernanceDecision(
+        action=action,
+        policy_version=policy_version,
+        rule_id=rule_id,
+        resource=(
+            GovernanceResource.from_wire(resource_raw, "governance.resource")
+            if resource_raw is not None
+            else None
+        ),
+        identity_revision=identity_revision,
+        reason=reason,
+    )
+
+
+def _resource_to_wire(value: GovernanceResource | Mapping[str, Any]) -> dict[str, str]:
+    resource = (
+        value
+        if isinstance(value, GovernanceResource)
+        else GovernanceResource.from_wire(value)
+    )
+    return resource.to_wire()
+
+
+def _validate_identity_revision(value: str | None) -> str | None:
+    if value is not None and (not isinstance(value, str) or not value):
+        raise ValueError("Firewall: identity_revision must be a non-empty string")
+    return value
+
+
+def _is_blocked_result(result: BlockResult) -> bool:
+    return result.prediction == "MALICIOUS" or (
+        result.governance is not None and result.governance.action == "block"
     )
 
 
@@ -197,6 +269,8 @@ def _single_payload(
     metadata: ClassificationMetadata | None,
     request_id: str,
     mode: FirewallMode | None,
+    resource: GovernanceResource | Mapping[str, Any] | None,
+    identity_revision: str | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"text": sanitize_text(text)}
     if mode is not None:
@@ -206,6 +280,11 @@ def _single_payload(
         payload["hook"] = hook_str
     if tool_name:
         payload["tool_name"] = tool_name
+    if resource is not None:
+        payload["resource"] = _resource_to_wire(resource)
+    revision = _validate_identity_revision(identity_revision)
+    if revision is not None:
+        payload["identity_revision"] = revision
     payload["metadata"] = _sdk_metadata(metadata, request_id=request_id)
     return payload
 
@@ -218,6 +297,8 @@ def _batch_payload(
     metadata: Sequence[ClassificationMetadata | None] | None,
     request_id: str,
     mode: FirewallMode | None,
+    resources: Sequence[GovernanceResource | Mapping[str, Any] | None] | None,
+    identity_revision: str | None,
 ) -> tuple[list[str], dict[str, Any]]:
     text_list = [sanitize_text(text) for text in texts]
     if not text_list:
@@ -236,6 +317,11 @@ def _batch_payload(
             f"Firewall: metadata length {len(metadata)} does not match texts length "
             f"{len(text_list)}"
         )
+    if resources is not None and len(resources) != len(text_list):
+        raise ValueError(
+            f"Firewall: resources length {len(resources)} does not match texts length "
+            f"{len(text_list)}"
+        )
 
     payload: dict[str, Any] = {"texts": text_list}
     if mode is not None:
@@ -244,6 +330,14 @@ def _batch_payload(
         payload["hooks"] = [hook_value(h) for h in hooks]
     if tool_names:
         payload["tool_names"] = list(tool_names)
+    if resources is not None:
+        payload["resources"] = [
+            _resource_to_wire(resource) if resource is not None else None
+            for resource in resources
+        ]
+    revision = _validate_identity_revision(identity_revision)
+    if revision is not None:
+        payload["identity_revision"] = revision
     payload["metadata"] = [
         _sdk_metadata(
             metadata[index] if metadata is not None else None,
@@ -283,7 +377,7 @@ def _new_classify_event(
         tool_name=tool_name,
         text=text,
         result=result,
-        blocked=result.prediction == "MALICIOUS",
+        blocked=_is_blocked_result(result),
         mode=effective_mode,
         shadow_mode=effective_mode == "shadow",
     )
@@ -337,6 +431,8 @@ class Firewall:
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
+        resource: GovernanceResource | None = None,
+        identity_revision: str | None = None,
     ) -> BlockResult:
         """Classify a single text and enforce the backend tenant threshold."""
         request_id_value = request_id or str(uuid4())
@@ -348,6 +444,8 @@ class Firewall:
             metadata=metadata,
             request_id=request_id_value,
             mode=requested_mode,
+            resource=resource,
+            identity_revision=identity_revision,
         )
         event = self._new_classify_event(
             text=text,
@@ -377,6 +475,8 @@ class Firewall:
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
+        resources: Sequence[GovernanceResource | None] | None = None,
+        identity_revision: str | None = None,
     ) -> list[BlockResult]:
         """Classify multiple independent texts and enforce backend tenant thresholds."""
         request_id_value = request_id or str(uuid4())
@@ -388,6 +488,8 @@ class Firewall:
             metadata=metadata,
             request_id=request_id_value,
             mode=requested_mode,
+            resources=resources,
+            identity_revision=identity_revision,
         )
         blocked: list[BlockedBatchItem] = []
         for index, result in enumerate(results):
@@ -435,6 +537,8 @@ class Firewall:
         metadata: ClassificationMetadata | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        resource: GovernanceResource | None = None,
+        identity_revision: str | None = None,
     ) -> BlockResult:
         payload = _single_payload(
             text,
@@ -443,6 +547,8 @@ class Firewall:
             metadata=metadata,
             request_id=request_id,
             mode=mode,
+            resource=resource,
+            identity_revision=identity_revision,
         )
         return _block_result_from_json(self._post_json(payload), mode)
 
@@ -477,6 +583,8 @@ class Firewall:
         metadata: Sequence[ClassificationMetadata | None] | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        resources: Sequence[GovernanceResource | None] | None = None,
+        identity_revision: str | None = None,
     ) -> list[BlockResult]:
         text_list, payload = _batch_payload(
             texts,
@@ -485,6 +593,8 @@ class Firewall:
             metadata=metadata,
             request_id=request_id,
             mode=mode,
+            resources=resources,
+            identity_revision=identity_revision,
         )
         data = self._post_json(payload)
         return _batch_results(data, expected_length=len(text_list), mode=mode)

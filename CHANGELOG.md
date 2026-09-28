@@ -2,6 +2,34 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.7.0 - 2026-09-26
+
+- Add validated public governance resource and decision types for all seven
+  contract resource kinds.
+- Send optional canonical `resource`/`resources` and `identity_revision`
+  fields while preserving raw tool names and legacy request wire shapes.
+- Retain governance action, rule, policy version, resource, identity revision,
+  and identity-resolution reason on classification results.
+- Enforce governance Block decisions even when threat classification is
+  benign, while preserving explicit Shadow and Warn behavior in direct,
+  callback, batch, async, and LangChain flows.
+- Add an MCP raw-name resolver. Server-only catalogs keep the entire
+  remaining tool ID after every configured server ID, explicit alias, or
+  hyphen-to-underscore host spelling. Repeated rows for one canonical server
+  keep every alias. A tool catalog matches complete server and tool
+  spellings only when that parent server is still configured. One distinct
+  canonical ref resolves; the same alias on distinct servers, and other exact
+  or alias collisions, stay ambiguous. A typed caller-supplied resource stays
+  authoritative.
+- Pin the isolated Hatchling build backend to the supported 1.27 release line
+  so release artifacts use Core Metadata 2.4 accepted by the package checks.
+
+Compatibility: deploy compatible Firewall readers before installing this SDK.
+Upgrade Hermes and other Python adapters after the SDK is published. Keep
+existing policies on their current schema until every enforcement consumer in
+the target scope is verified against contract 1.0.0; then explicitly activate
+runtime schema 6.
+
 ## 0.6.1 - 2026-09-24
 
 - Add public `AsyncFirewall` single and batch classification with a persistent

@@ -20,6 +20,11 @@ from silmaril_security.sdk.firewall import (
     Firewall,
     SilmarilFirewall,
 )
+from silmaril_security.sdk.governance import (
+    McpIdentityResolution,
+    McpIdentityResolutionStatus,
+    resolve_mcp_tool_identity,
+)
 from silmaril_security.sdk.hooks import (
     ALL_HOOKS,
     DEFAULT_HOOKS,
@@ -63,6 +68,11 @@ from silmaril_security.sdk.types import (
     ClassificationMetadata,
     ClassifyEvent,
     FirewallMode,
+    GovernanceAction,
+    GovernanceDecision,
+    GovernanceReason,
+    GovernanceResource,
+    GovernanceResourceKind,
     Prediction,
 )
 
@@ -86,9 +96,16 @@ __all__ = [
     "FirewallBlockedException",
     "FirewallHook",
     "FirewallMode",
+    "GovernanceAction",
+    "GovernanceDecision",
+    "GovernanceReason",
+    "GovernanceResource",
+    "GovernanceResourceKind",
     "HARMFUL_OUTCOMES",
     "HarmfulOutcome",
     "HookLabel",
+    "McpIdentityResolution",
+    "McpIdentityResolutionStatus",
     "INPUT_HOOKS",
     "OUTCOME_BENIGN",
     "OUTCOME_CLICKUP_TERMS_VIOLATION",
@@ -119,6 +136,7 @@ __all__ = [
     "prepend_hook",
     "prepend_tool_name",
     "resolve_hooks",
+    "resolve_mcp_tool_identity",
 ]
 
 

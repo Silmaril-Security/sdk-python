@@ -38,6 +38,7 @@ from silmaril_security.sdk.types import (
     ClassificationMetadata,
     ClassifyEvent,
     FirewallMode,
+    GovernanceResource,
 )
 
 if TYPE_CHECKING:
@@ -205,6 +206,8 @@ class AsyncFirewall:
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
+        resource: GovernanceResource | None = None,
+        identity_revision: str | None = None,
     ) -> BlockResult:
         """Classify one text without blocking the event loop."""
         request_id_value = request_id or str(uuid4())
@@ -216,6 +219,8 @@ class AsyncFirewall:
             metadata=metadata,
             request_id=request_id_value,
             mode=requested_mode,
+            resource=resource,
+            identity_revision=identity_revision,
         )
         event = _new_classify_event(text=text, hook=hook, tool_name=tool_name, result=result)
         await self._fire_on_classify(event)
@@ -240,6 +245,8 @@ class AsyncFirewall:
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
+        resources: Sequence[GovernanceResource | None] | None = None,
+        identity_revision: str | None = None,
     ) -> list[BlockResult]:
         """Classify independent texts in one async request."""
         request_id_value = request_id or str(uuid4())
@@ -256,6 +263,8 @@ class AsyncFirewall:
             metadata=metadata,
             request_id=request_id_value,
             mode=requested_mode,
+            resources=resources,
+            identity_revision=identity_revision,
         )
         blocked: list[BlockedBatchItem] = []
         for index, result in enumerate(results):
@@ -297,6 +306,8 @@ class AsyncFirewall:
         metadata: ClassificationMetadata | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        resource: GovernanceResource | None = None,
+        identity_revision: str | None = None,
     ) -> BlockResult:
         payload = _single_payload(
             text,
@@ -305,6 +316,8 @@ class AsyncFirewall:
             metadata=metadata,
             request_id=request_id,
             mode=mode,
+            resource=resource,
+            identity_revision=identity_revision,
         )
         return _block_result_from_json(await self._post_json(payload), mode)
 
@@ -317,6 +330,8 @@ class AsyncFirewall:
         metadata: Sequence[ClassificationMetadata | None] | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        resources: Sequence[GovernanceResource | None] | None = None,
+        identity_revision: str | None = None,
     ) -> list[BlockResult]:
         text_list, payload = _batch_payload(
             texts,
@@ -325,6 +340,8 @@ class AsyncFirewall:
             metadata=metadata,
             request_id=request_id,
             mode=mode,
+            resources=resources,
+            identity_revision=identity_revision,
         )
         data = await self._post_json(payload)
         return _batch_results(data, expected_length=len(text_list), mode=mode)
