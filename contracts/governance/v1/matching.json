@@ -831,6 +831,38 @@
       },
       "result": null,
       "failure": "ambiguous"
+    },
+    {
+      "name": "orphan tool parent unresolved",
+      "raw_name": "mcp__removed__search",
+      "catalog": {
+        "servers": [
+          {
+            "id": "active"
+          }
+        ],
+        "tools": [
+          {
+            "id": "search",
+            "parent_id": "removed"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "unresolved"
+    },
+    {
+      "name": "whitespace-only server suffix unresolved",
+      "raw_name": "mcp__active__   ",
+      "catalog": {
+        "servers": [
+          {
+            "id": "active"
+          }
+        ]
+      },
+      "result": null,
+      "failure": "unresolved"
     }
   ]
 }
