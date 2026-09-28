@@ -59,6 +59,7 @@ resolution = resolve_mcp_tool_identity(
 resource = resolution.resource
 if resolution.status != "resolved" or resource is None:
     raise RuntimeError("MCP identity is not resolved")
+catalog_snapshot_id = os.environ["SILMARIL_MCP_CATALOG_REVISION"]
 fw = Firewall(
     api_key=os.environ["SILMARIL_API_KEY"],
     api_url=os.environ["SILMARIL_API_URL"],
@@ -74,9 +75,9 @@ fw.classify(
 
 This catalog resolves to
 `GovernanceResource(kind="mcp_tool", id="search", parent_id="arxiv-mcp-server")`.
-`catalog_snapshot_id` is the immutable revision of the catalog snapshot used
-for that resolution. In Block mode, classify an MCP call only after identity
-resolves to that resource and revision.
+The host sets `SILMARIL_MCP_CATALOG_REVISION` to the trusted snapshot revision
+that supplied this server catalog. In Block mode, classify an MCP call only
+after identity resolves to that resource and revision.
 
 Use a GitHub branch install only when you intentionally want the current branch
 tip:

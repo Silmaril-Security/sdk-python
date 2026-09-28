@@ -534,6 +534,57 @@ def test_tool_catalog_orphan_parent_is_unresolved_unless_authoritative():
     assert colon_only.resource == server_only.resource
 
 
+def _readme_mcp_example() -> str:
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    marker = (
+        "```python\nimport os\n\nfrom silmaril_security.sdk import "
+        "Firewall, HookLabel, resolve_mcp_tool_identity\n"
+    )
+    start = readme.index(marker) + len("```python\n")
+    return readme[start : readme.index("```", start)]
+
+
+def test_readme_mcp_example_classifies_only_resolved_identity(monkeypatch):
+    example = _readme_mcp_example()
+    guard = example.index('resolution.status != "resolved"')
+    revision = example.index('os.environ["SILMARIL_MCP_CATALOG_REVISION"]')
+    classify = example.index("identity_revision=catalog_snapshot_id")
+    assert guard < revision < classify
+    payloads = []
+
+    def post(self, payload):
+        payloads.append(payload)
+        return {
+            "prediction": "BENIGN",
+            "score": 0.0,
+            "threshold": 0.5,
+            "mode": "block",
+        }
+
+    monkeypatch.setattr(Firewall, "_post_json", post)
+    monkeypatch.setenv("SILMARIL_API_KEY", "test-key")
+    monkeypatch.setenv("SILMARIL_API_URL", TEST_API_URL)
+    monkeypatch.setenv("SILMARIL_MCP_CATALOG_REVISION", "trusted-snapshot")
+    exec(example, {"__name__": "readme_mcp_example"})
+    assert payloads[0]["tool_name"] == "mcp__arxiv_mcp_server__search"
+    assert payloads[0]["resource"] == {
+        "kind": "mcp_tool",
+        "id": "search",
+        "parent_id": "arxiv-mcp-server",
+    }
+    assert payloads[0]["identity_revision"] == "trusted-snapshot"
+    assert payloads[0]["metadata"].get("identity_revision") is None
+
+    payloads.clear()
+    monkeypatch.delenv("SILMARIL_MCP_CATALOG_REVISION", raising=False)
+    with pytest.raises(RuntimeError, match="MCP identity is not resolved"):
+        exec(
+            example.replace('["arxiv-mcp-server"]', '["other-server"]'),
+            {"__name__": "readme_mcp_example_unresolved"},
+        )
+    assert payloads == []
+
+
 def test_tool_catalog_exact_and_alias_spellings_are_ambiguous():
     resolution = resolve_mcp_tool_identity(
         "MCP:prod_west:search",
