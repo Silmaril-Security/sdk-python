@@ -183,6 +183,98 @@ def test_resolver_reports_unknown_configured_server_without_fallback():
     ).status == "unresolved"
 
 
+@pytest.mark.parametrize(
+    ("host_tool_name", "server_id"),
+    [
+        ("mcp__prod__west__search", "prod__west"),
+        ("MCP:prod:west:search", "prod:west"),
+    ],
+)
+def test_resolver_keeps_separator_ids_authoritative(host_tool_name, server_id):
+    resolved = resolve_mcp_tool_identity(host_tool_name, [server_id])
+    assert resolved.status == "resolved"
+    assert resolved.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id=server_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("host_tool_name", "server_ids"),
+    [
+        ("mcp__prod__west__search", ["prod", "prod__west"]),
+        ("MCP:prod:west:search", ["prod", "prod:west"]),
+    ],
+)
+def test_resolver_reports_overlapping_exact_prefixes(host_tool_name, server_ids):
+    resolution = resolve_mcp_tool_identity(host_tool_name, server_ids)
+    assert resolution.status == "ambiguous"
+    assert resolution.resource is None
+
+
+def test_resolver_prefers_exact_separator_prefix_over_alias_collision():
+    resolved = resolve_mcp_tool_identity(
+        "mcp__prod__west__search",
+        ["prod__west", "prod-_west"],
+    )
+    assert resolved.status == "resolved"
+    assert resolved.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="prod__west",
+    )
+
+    collision = resolve_mcp_tool_identity(
+        "mcp__a_b__c__list",
+        ["a-b__c", "a-b-_c"],
+    )
+    assert collision.status == "ambiguous"
+    assert collision.resource is None
+    colon_collision = resolve_mcp_tool_identity(
+        "MCP:a_b:c_d:list",
+        ["a-b:c_d", "a-b:c-d"],
+    )
+    assert colon_collision.status == "ambiguous"
+    assert colon_collision.resource is None
+
+
+@pytest.mark.parametrize(
+    "host_tool_name",
+    [
+        "search",
+        "mcp_prod_west_search",
+        "mcp__prod__west__search\n",
+        "mcp__prod\n__west__search",
+        "mcp__prod__west__search\rsearch",
+        "MCP:prod:west:search\n",
+        "MCP:prod\n:west:search",
+        "mcp__" + ("a_" * 5000) + "search",
+    ],
+)
+def test_resolver_rejects_malformed_newline_and_long_names(host_tool_name):
+    resolution = resolve_mcp_tool_identity(
+        host_tool_name,
+        ["prod__west", "prod:west", "prod\nwest", "a"],
+    )
+    assert resolution.status == "unresolved"
+    assert resolution.resource is None
+
+
+def test_resolver_matches_long_configured_separator_id():
+    server_id = "prod__" + ("west__" * 50) + "region"
+    resolution = resolve_mcp_tool_identity(
+        f"mcp__{server_id}__search",
+        [server_id],
+    )
+    assert resolution.status == "resolved"
+    assert resolution.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id=server_id,
+    )
+
+
 def test_sync_resource_wire_response_callback_and_benign_governance_block(monkeypatch):
     payloads = []
     events = []

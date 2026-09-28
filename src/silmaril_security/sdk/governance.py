@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -12,9 +11,9 @@ from typing import Literal
 from silmaril_security.sdk.types import GovernanceResource
 
 McpIdentityResolutionStatus = Literal["resolved", "unresolved", "ambiguous"]
-_MCP_TOOL_NAMES = (
-    re.compile(r"^mcp__(.+?)__(.+)$"),
-    re.compile(r"^MCP:([^:]+):(.+)$"),
+_HOST_FORMS = (
+    ("mcp__", "__"),
+    ("MCP:", ":"),
 )
 
 
@@ -32,61 +31,99 @@ def resolve_mcp_tool_identity(
 ) -> McpIdentityResolution:
     """Resolve a host MCP tool name using only supplied configured server IDs.
 
-    Exact configured IDs win. Otherwise, a host alias formed by replacing
-    hyphens with underscores must identify exactly one configured server.
+    Exact configured IDs are matched as complete prefixes, so an ID may itself
+    contain ``__`` or ``:``. One nonempty tool remainder resolves. Multiple
+    exact prefixes are ambiguous. A hyphen-to-underscore alias is considered
+    only when no exact prefix matches, and only a unique alias resolves.
     """
 
-    parsed = _parse_host_tool_name(host_tool_name)
-    if parsed is None:
+    form = _host_form(host_tool_name)
+    if form is None:
         return McpIdentityResolution(status="unresolved")
-    host_server_id, tool_id = parsed
+    marker, separator = form
+    server_ids = _configured_server_ids(configured_server_ids)
 
-    server_ids = tuple(
+    exact = _prefix_matches(
+        host_tool_name,
+        server_ids,
+        marker,
+        separator,
+        alias=False,
+    )
+    if len(exact) == 1:
+        return _resolved(*exact[0])
+    if len(exact) > 1:
+        return McpIdentityResolution(status="ambiguous")
+
+    aliases = _prefix_matches(
+        host_tool_name,
+        server_ids,
+        marker,
+        separator,
+        alias=True,
+    )
+    if len(aliases) == 1:
+        return _resolved(*aliases[0])
+    if len(aliases) > 1:
+        return McpIdentityResolution(status="ambiguous")
+    return McpIdentityResolution(status="unresolved")
+
+
+def _host_form(host_tool_name: object) -> tuple[str, str] | None:
+    if (
+        not isinstance(host_tool_name, str)
+        or "\n" in host_tool_name
+        or "\r" in host_tool_name
+    ):
+        return None
+    for marker, separator in _HOST_FORMS:
+        if host_tool_name.startswith(marker):
+            return marker, separator
+    return None
+
+
+def _configured_server_ids(server_ids: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
         dict.fromkeys(
             server_id
-            for server_id in configured_server_ids
-            if isinstance(server_id, str) and _has_non_whitespace(server_id)
+            for server_id in server_ids
+            if isinstance(server_id, str)
+            and _has_non_whitespace(server_id)
+            and "\n" not in server_id
+            and "\r" not in server_id
         )
     )
-    if host_server_id in server_ids:
-        return McpIdentityResolution(
-            status="resolved",
-            resource=GovernanceResource(
-                kind="mcp_tool",
-                id=tool_id,
-                parent_id=host_server_id,
-            ),
-        )
 
-    candidates = [
-        server_id
-        for server_id in server_ids
-        if server_id.replace("-", "_") == host_server_id
-    ]
-    if len(candidates) == 1:
-        return McpIdentityResolution(
-            status="resolved",
-            resource=GovernanceResource(
-                kind="mcp_tool",
-                id=tool_id,
-                parent_id=candidates[0],
-            ),
-        )
+
+def _prefix_matches(
+    host_tool_name: str,
+    server_ids: Sequence[str],
+    marker: str,
+    separator: str,
+    *,
+    alias: bool,
+) -> list[tuple[str, str]]:
+    matches: list[tuple[str, str]] = []
+    for server_id in server_ids:
+        observed_id = server_id.replace("-", "_") if alias else server_id
+        prefix = f"{marker}{observed_id}{separator}"
+        if not host_tool_name.startswith(prefix):
+            continue
+        tool_id = host_tool_name[len(prefix) :]
+        if _has_non_whitespace(tool_id):
+            matches.append((server_id, tool_id))
+    return matches
+
+
+def _resolved(server_id: str, tool_id: str) -> McpIdentityResolution:
     return McpIdentityResolution(
-        status="ambiguous" if len(candidates) > 1 else "unresolved"
+        status="resolved",
+        resource=GovernanceResource(
+            kind="mcp_tool",
+            id=tool_id,
+            parent_id=server_id,
+        ),
     )
-
-
-def _parse_host_tool_name(host_tool_name: object) -> tuple[str, str] | None:
-    if not isinstance(host_tool_name, str):
-        return None
-    for pattern in _MCP_TOOL_NAMES:
-        match = pattern.fullmatch(host_tool_name)
-        if match is not None:
-            server_id, tool_id = match.groups()
-            if _has_non_whitespace(server_id) and _has_non_whitespace(tool_id):
-                return server_id, tool_id
-    return None
 
 
 def _has_non_whitespace(value: str) -> bool:
