@@ -17,8 +17,10 @@ All notable changes to the Silmaril Firewall Python SDK are documented here.
   remaining tool ID after every configured server ID, explicit alias, or
   hyphen-to-underscore host spelling. Repeated rows for one canonical server
   keep every alias. A tool catalog matches complete server and tool
-  spellings. One distinct canonical ref resolves; the same alias on distinct
-  servers, and other exact or alias collisions, stay ambiguous.
+  spellings only when that parent server is still configured. One distinct
+  canonical ref resolves; the same alias on distinct servers, and other exact
+  or alias collisions, stay ambiguous. A typed caller-supplied resource stays
+  authoritative.
 - Pin the isolated Hatchling build backend to the supported 1.27 release line
   so release artifacts use Core Metadata 2.4 accepted by the package checks.
 

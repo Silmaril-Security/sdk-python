@@ -43,6 +43,37 @@ For reproducible installs, pin a tagged release:
 pip install silmaril-security-sdk==0.7.0
 ```
 
+Deploy a Firewall reader that can accept governance resource identity before
+using 0.7.0. The reader must be capable of runtime schema 6. Installing this
+SDK does not activate schema 6.
+
+```python
+import os
+
+from silmaril_security.sdk import Firewall, HookLabel, resolve_mcp_tool_identity
+
+resolution = resolve_mcp_tool_identity(
+    "mcp__arxiv_mcp_server__search",
+    ["arxiv-mcp-server"],
+)
+fw = Firewall(
+    api_key=os.environ["SILMARIL_API_KEY"],
+    api_url=os.environ["SILMARIL_API_URL"],
+)
+fw.classify(
+    "query the paper catalog",
+    hook=HookLabel.TOOL_CALL,
+    tool_name="mcp__arxiv_mcp_server__search",
+    resource=resolution.resource,
+    identity_revision="catalog-1",
+)
+```
+
+For this catalog, `resolution.resource` is
+`GovernanceResource(kind="mcp_tool", id="search", parent_id="arxiv-mcp-server")`.
+`resource` and `identity_revision` are optional; omit them to keep the legacy
+request shape.
+
 Use a GitHub branch install only when you intentionally want the current branch
 tip:
 

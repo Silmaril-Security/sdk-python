@@ -42,9 +42,11 @@ def resolve_mcp_tool_identity(
     underscores as hyphens. Server-only catalogs take the nonempty remainder
     after a separator-bounded prefix, including further separators. A tool
     catalog matches complete ``mcp__{key}__{tool}`` or ``MCP:{key}:{tool}``
-    spellings. Identical canonical refs count once. Several distinct refs,
-    including the same alias on different servers, are ambiguous, and none is
-    unresolved.
+    spellings only when the tool's parent server is still configured; a stale
+    or orphan parent is unresolved. Identical canonical refs count once.
+    Several distinct refs, including the same alias on different servers, are
+    ambiguous, and none is unresolved. A typed canonical resource supplied by
+    the caller stays authoritative over raw spelling.
     """
 
     if authoritative_resource is not None:
@@ -152,7 +154,10 @@ def _tool_spelling_candidates(
             continue
         if not _valid_id(tool_id) or not _valid_id(parent_id):
             continue
-        for key in keys_by_server.get(parent_id, (parent_id,)):
+        keys = keys_by_server.get(parent_id)
+        if keys is None:
+            continue
+        for key in keys:
             if body == f"{key}{separator}{tool_id}":
                 candidates.append((parent_id, tool_id))
     return candidates

@@ -491,6 +491,49 @@ def test_shared_alias_across_distinct_servers_stays_ambiguous():
         assert server_only.resource is None
 
 
+def test_tool_catalog_orphan_parent_is_unresolved_unless_authoritative():
+    stale_tool = {
+        "id": "search",
+        "parent_id": "removed-server",
+        "resource": {
+            "kind": "mcp_tool",
+            "id": "search",
+            "parent_id": "removed-server",
+        },
+    }
+    servers = ["other-server"]
+    trusted = GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="removed-server",
+    )
+    for host_tool_name in (
+        "mcp__removed-server__search",
+        "MCP:removed-server:search",
+    ):
+        orphan = resolve_mcp_tool_identity(host_tool_name, servers, [stale_tool])
+        assert orphan.status == "unresolved"
+        assert orphan.resource is None
+        override = resolve_mcp_tool_identity(
+            host_tool_name,
+            servers,
+            [stale_tool],
+            authoritative_resource=trusted,
+        )
+        assert override.status == "resolved"
+        assert override.resource == trusted
+    server_only = resolve_mcp_tool_identity("mcp__other-server__search", servers)
+    assert server_only.status == "resolved"
+    assert server_only.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="other-server",
+    )
+    colon_only = resolve_mcp_tool_identity("MCP:other-server:search", servers)
+    assert colon_only.status == "resolved"
+    assert colon_only.resource == server_only.resource
+
+
 def test_tool_catalog_exact_and_alias_spellings_are_ambiguous():
     resolution = resolve_mcp_tool_identity(
         "MCP:prod_west:search",
