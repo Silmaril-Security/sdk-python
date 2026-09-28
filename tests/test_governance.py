@@ -130,6 +130,78 @@ def test_malformed_concrete_resources_are_rejected(value):
 
 @pytest.mark.parametrize(
     "host_tool_name",
+    ["mcp__arxiv_mcp_server__search", "MCP:arxiv_mcp_server:search"],
+)
+def test_bare_server_catalog_derives_hyphen_host_alias(host_tool_name):
+    resolution = resolve_mcp_tool_identity(host_tool_name, ["arxiv-mcp-server"])
+    assert resolution.status == "resolved"
+    assert resolution.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="arxiv-mcp-server",
+    )
+
+
+def test_derived_host_alias_collides_with_exact_server_id():
+    resolution = resolve_mcp_tool_identity(
+        "mcp__arxiv_mcp_server__search",
+        ["arxiv-mcp-server", "arxiv_mcp_server"],
+    )
+    assert resolution.status == "ambiguous"
+    assert resolution.resource is None
+    colon = resolve_mcp_tool_identity(
+        "MCP:arxiv_mcp_server:search",
+        ["arxiv_mcp_server", "arxiv-mcp-server"],
+    )
+    assert colon.status == "ambiguous"
+    assert colon.resource is None
+
+
+def test_explicit_alias_remains_equal_to_derived_host_alias():
+    servers = [{"id": "arxiv-mcp-server", "aliases": ["custom_host"]}]
+    explicit = resolve_mcp_tool_identity("mcp__custom_host__search", servers)
+    derived = resolve_mcp_tool_identity("MCP:arxiv_mcp_server:search", servers)
+    assert explicit.status == "resolved"
+    assert explicit.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="arxiv-mcp-server",
+    )
+    assert derived.status == "resolved"
+    assert derived.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="arxiv-mcp-server",
+    )
+
+
+def test_separator_server_ids_derive_host_alias_without_reversing_underscores():
+    derived = resolve_mcp_tool_identity(
+        "mcp__my__server__search",
+        ["my--server"],
+    )
+    assert derived.status == "resolved"
+    assert derived.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="search",
+        parent_id="my--server",
+    )
+    reverse = resolve_mcp_tool_identity(
+        "mcp__arxiv-mcp-server__search",
+        ["arxiv_mcp_server"],
+    )
+    assert reverse.status == "unresolved"
+    assert reverse.resource is None
+    unrelated = resolve_mcp_tool_identity(
+        "MCP:other:search",
+        ["arxiv-mcp-server"],
+    )
+    assert unrelated.status == "unresolved"
+    assert unrelated.resource is None
+
+
+@pytest.mark.parametrize(
+    "host_tool_name",
     [
         "mcp__silmaril_firewall__list",
         "MCP:silmaril_firewall:list",

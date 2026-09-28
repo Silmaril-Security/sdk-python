@@ -14,9 +14,10 @@ All notable changes to the Silmaril Firewall Python SDK are documented here.
   benign, while preserving explicit Shadow and Warn behavior in direct,
   callback, batch, async, and LangChain flows.
 - Add an MCP raw-name resolver. Server-only catalogs keep the entire
-  remaining tool ID after every configured server or alias prefix. A tool
-  catalog matches complete server and tool spellings. One distinct canonical
-  ref resolves; exact and alias collisions stay ambiguous.
+  remaining tool ID after every configured server ID, explicit alias, or
+  hyphen-to-underscore host spelling. A tool catalog matches complete server
+  and tool spellings. One distinct canonical ref resolves; exact and alias
+  collisions stay ambiguous.
 - Pin the isolated Hatchling build backend to the supported 1.27 release line
   so release artifacts use Core Metadata 2.4 accepted by the package checks.
 

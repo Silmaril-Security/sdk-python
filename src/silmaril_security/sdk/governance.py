@@ -35,12 +35,14 @@ def resolve_mcp_tool_identity(
     """Resolve one raw MCP dispatch name against a configured catalog.
 
     A supplied canonical resource is authoritative. Otherwise every configured
-    server ID and alias is one candidate set: an exact ID does not outrank an
-    alias. Server-only catalogs take the nonempty remainder after a
-    separator-bounded prefix, including further separators. A tool catalog
-    matches complete ``mcp__{key}__{tool}`` or ``MCP:{key}:{tool}`` spellings.
-    Identical canonical refs count once. Several distinct refs are ambiguous,
-    and none is unresolved.
+    server ID, explicit alias, and deterministic host alias is one candidate
+    set: an exact ID does not outrank an alias. The host alias replaces
+    hyphens in the configured server ID with underscores and never rewrites
+    underscores as hyphens. Server-only catalogs take the nonempty remainder
+    after a separator-bounded prefix, including further separators. A tool
+    catalog matches complete ``mcp__{key}__{tool}`` or ``MCP:{key}:{tool}``
+    spellings. Identical canonical refs count once. Several distinct refs are
+    ambiguous, and none is unresolved.
     """
 
     if authoritative_resource is not None:
@@ -103,7 +105,10 @@ def _server_rows(
             continue
         if not _valid_id(server_id):
             continue
-        keys = (server_id, *[alias for alias in aliases if _valid_id(alias)])
+        keys = [server_id, *[alias for alias in aliases if _valid_id(alias)]]
+        host_alias = server_id.replace("-", "_")
+        if host_alias != server_id and _valid_id(host_alias):
+            keys.append(host_alias)
         rows.append((server_id, tuple(dict.fromkeys(keys))))
     return tuple(rows)
 
