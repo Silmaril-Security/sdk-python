@@ -33,6 +33,8 @@ from silmaril_security.sdk.types import (
     ClassificationMetadata,
     ClassifyEvent,
     FirewallMode,
+    GovernanceContext,
+    GovernanceDecision,
 )
 
 LOG = logging.getLogger("silmaril_security.sdk")
@@ -95,11 +97,13 @@ def _block_result_from_json(
     if prediction not in ("BENIGN", "MALICIOUS"):
         raise ValueError(f"Firewall: invalid prediction {prediction!r}")
     primary_raw = data.get("primary_outcome")
+    governance = _governance_decision_from_json(data.get("governance"))
     return BlockResult(
         prediction=prediction,
         score=score,
         threshold=threshold,
         mode=_normalize_mode(data.get("mode"), requested_mode),
+        governance=governance,
         primary_outcome=(
             normalize_primary_outcome(primary_raw) if primary_raw is not None else None
         ),
@@ -115,11 +119,43 @@ def _block_result_from_json(
     )
 
 
+def _governance_decision_from_json(value: Any) -> GovernanceDecision | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("Firewall: response governance must be an object")
+    action = value.get("action")
+    if action not in ("allow", "block"):
+        raise ValueError("Firewall: response governance action must be allow or block")
+    version = value.get("policy_version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("Firewall: response governance policy_version must be a non-empty string")
+    rule_id = value.get("rule_id")
+    if rule_id is not None and not isinstance(rule_id, str):
+        raise ValueError("Firewall: response governance rule_id must be a string when provided")
+    return GovernanceDecision(action=action, policy_version=version, rule_id=rule_id)
+
+
+def _governance_context_to_wire(context: GovernanceContext) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if context.agent is not None:
+        payload["agent"] = context.agent
+    if context.resource is not None:
+        resource: dict[str, Any] = {"kind": context.resource.kind}
+        if context.resource.id is not None:
+            resource["id"] = context.resource.id
+        if context.resource.parent_id is not None:
+            resource["parent_id"] = context.resource.parent_id
+        payload["resource"] = resource
+    return payload
+
+
 def _sdk_metadata(
     metadata: ClassificationMetadata | None,
     *,
     request_id: str,
     input_index: int | None = None,
+    governance: GovernanceContext | None = None,
 ) -> dict[str, Any]:
     payload = dict(metadata) if metadata is not None else {}
     existing = payload.get("silmaril")
@@ -134,6 +170,8 @@ def _sdk_metadata(
             **({"input_index": input_index} if input_index is not None else {}),
         }
     )
+    if governance is not None:
+        namespace["governance"] = _governance_context_to_wire(governance)
     payload["silmaril"] = namespace
     return payload
 
@@ -195,6 +233,7 @@ def _single_payload(
     hook: HookLabel | str | None,
     tool_name: str | None,
     metadata: ClassificationMetadata | None,
+    governance: GovernanceContext | None,
     request_id: str,
     mode: FirewallMode | None,
 ) -> dict[str, Any]:
@@ -206,7 +245,7 @@ def _single_payload(
         payload["hook"] = hook_str
     if tool_name:
         payload["tool_name"] = tool_name
-    payload["metadata"] = _sdk_metadata(metadata, request_id=request_id)
+    payload["metadata"] = _sdk_metadata(metadata, request_id=request_id, governance=governance)
     return payload
 
 
@@ -216,6 +255,7 @@ def _batch_payload(
     hooks: Sequence[HookLabel | str] | None,
     tool_names: Sequence[str | None] | None,
     metadata: Sequence[ClassificationMetadata | None] | None,
+    governance: Sequence[GovernanceContext | None] | None,
     request_id: str,
     mode: FirewallMode | None,
 ) -> tuple[list[str], dict[str, Any]]:
@@ -236,6 +276,11 @@ def _batch_payload(
             f"Firewall: metadata length {len(metadata)} does not match texts length "
             f"{len(text_list)}"
         )
+    if governance is not None and len(governance) != len(text_list):
+        raise ValueError(
+            f"Firewall: governance length {len(governance)} does not match texts length "
+            f"{len(text_list)}"
+        )
 
     payload: dict[str, Any] = {"texts": text_list}
     if mode is not None:
@@ -249,6 +294,7 @@ def _batch_payload(
             metadata[index] if metadata is not None else None,
             request_id=request_id,
             input_index=index,
+            governance=governance[index] if governance is not None else None,
         )
         for index in range(len(text_list))
     ]
@@ -283,7 +329,9 @@ def _new_classify_event(
         tool_name=tool_name,
         text=text,
         result=result,
-        blocked=result.prediction == "MALICIOUS",
+        blocked=result.prediction == "MALICIOUS" or (
+            result.governance is not None and result.governance.action == "block"
+        ),
         mode=effective_mode,
         shadow_mode=effective_mode == "shadow",
     )
@@ -334,6 +382,7 @@ class Firewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
+        governance: GovernanceContext | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
@@ -346,6 +395,7 @@ class Firewall:
             hook=hook,
             tool_name=tool_name,
             metadata=metadata,
+            governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
         )
@@ -374,6 +424,7 @@ class Firewall:
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
+        governance: Sequence[GovernanceContext | None] | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
@@ -386,6 +437,7 @@ class Firewall:
             hooks=hooks,
             tool_names=tool_names,
             metadata=metadata,
+            governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
         )
@@ -433,6 +485,7 @@ class Firewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
+        governance: GovernanceContext | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
     ) -> BlockResult:
@@ -441,6 +494,7 @@ class Firewall:
             hook=hook,
             tool_name=tool_name,
             metadata=metadata,
+            governance=governance,
             request_id=request_id,
             mode=mode,
         )
@@ -475,6 +529,7 @@ class Firewall:
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
+        governance: Sequence[GovernanceContext | None] | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
     ) -> list[BlockResult]:
@@ -483,6 +538,7 @@ class Firewall:
             hooks=hooks,
             tool_names=tool_names,
             metadata=metadata,
+            governance=governance,
             request_id=request_id,
             mode=mode,
         )

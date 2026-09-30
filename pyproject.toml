@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "silmaril-security-sdk"
-version = "0.6.1"
+version = "0.7.0"
 description = "Python SDK for Silmaril Firewall prompt injection and jailbreak detection"
 authors = [
     { name = "Silmaril Security Inc" }
@@ -45,12 +45,16 @@ langchain = [
     "httpx>=0.25.0",
     "langchain-core>=0.2.0",
 ]
+deepagents = [
+    "httpx>=0.25.0",
+    "deepagents>=0.7.21,<0.8; python_version >= '3.11'",
+]
 dev = [
     "build>=1.2.0",
     "pytest>=7.4.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.1.0",
-    "twine>=5.0.0",
+    "twine>=7.0.0",
 ]
 
 [project.urls]

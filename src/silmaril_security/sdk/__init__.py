@@ -63,6 +63,11 @@ from silmaril_security.sdk.types import (
     ClassificationMetadata,
     ClassifyEvent,
     FirewallMode,
+    GovernanceAction,
+    GovernanceContext,
+    GovernanceDecision,
+    GovernanceResource,
+    GovernanceResourceKind,
     Prediction,
 )
 
@@ -86,6 +91,11 @@ __all__ = [
     "FirewallBlockedException",
     "FirewallHook",
     "FirewallMode",
+    "GovernanceAction",
+    "GovernanceContext",
+    "GovernanceDecision",
+    "GovernanceResource",
+    "GovernanceResourceKind",
     "HARMFUL_OUTCOMES",
     "HarmfulOutcome",
     "HookLabel",

@@ -11,15 +11,11 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from silmaril_security.sdk._utils import (
-    _TOOL_ROLES,
-    extract_content_text,
     extract_last_user_text,
     extract_text_from_documents,
     extract_text_from_llm_result,
     extract_text_from_prompts,
     extract_text_from_tool_input,
-    get_content,
-    get_role,
 )
 from silmaril_security.sdk.async_firewall import AsyncFirewall
 from silmaril_security.sdk.exceptions import FirewallBlockedException
@@ -68,6 +64,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         fail_open: bool = True,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        conversation_id: str | None = None,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -79,6 +76,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         self.fail_open = fail_open
         self.mode = firewall._effective_mode(mode, shadow_mode)
         self.shadow_mode = self.mode == "shadow"
+        self.conversation_id = conversation_id
         self.on_classify = on_classify
         self.logger = logger or LOG
 
@@ -102,7 +100,11 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
-                request_id=str(run_id),
+                metadata={
+                    "langgraph": {"run_id": str(run_id)},
+                    **({"conversationId": self.conversation_id} if self.conversation_id is not None else {}),
+                },
+                request_id=str(uuid4()),
                 mode=self.mode,
             )
         except Exception:
@@ -114,7 +116,9 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             )
             return
 
-        blocked = result.prediction == "MALICIOUS"
+        blocked = result.prediction == "MALICIOUS" or (
+            result.governance is not None and result.governance.action == "block"
+        )
         effective_mode = self.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,
@@ -160,17 +164,6 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
                 FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START],
             )
 
-        if self.include_tool:
-            for msg in all_messages:
-                if get_role(msg) in _TOOL_ROLES:
-                    tool_text = extract_content_text(get_content(msg)).strip()
-                    if tool_text:
-                        self._classify(
-                            tool_text,
-                            run_id,
-                            HookLabel.TOOL_RESPONSE,
-                            tool_name=getattr(msg, "name", None),
-                        )
 
     def on_llm_start(
         self,
@@ -194,7 +187,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
-        if FirewallHook.TOOL_START not in self._enabled_hooks:
+        if not self.include_tool or FirewallHook.TOOL_START not in self._enabled_hooks:
             return
         text = extract_text_from_tool_input(input_str)
         if text:
@@ -227,7 +220,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END])
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        if FirewallHook.TOOL_END not in self._enabled_hooks:
+        if not self.include_tool or FirewallHook.TOOL_END not in self._enabled_hooks:
             return
         text = str(output).strip()
         if text:
@@ -268,6 +261,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         fail_open: bool = True,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        conversation_id: str | None = None,
         on_classify: Callable[[ClassifyEvent], None | Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -280,6 +274,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             fail_open=fail_open,
             mode=mode,
             shadow_mode=shadow_mode,
+            conversation_id=conversation_id,
             on_classify=None,
             logger=logger,
         )
@@ -309,7 +304,11 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
-                request_id=str(run_id),
+                metadata={
+                    "langgraph": {"run_id": str(run_id)},
+                    **({"conversationId": self._sync_handler.conversation_id} if self._sync_handler.conversation_id is not None else {}),
+                },
+                request_id=str(uuid4()),
                 mode=self._sync_handler.mode,
             )
         except Exception:
@@ -321,7 +320,9 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             )
             return
 
-        blocked = result.prediction == "MALICIOUS"
+        blocked = result.prediction == "MALICIOUS" or (
+            result.governance is not None and result.governance.action == "block"
+        )
         effective_mode = self._sync_handler.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,
@@ -360,17 +361,6 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         text = extract_last_user_text(all_messages)
         if text:
             await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.CHAT_MODEL_START])
-        if self._sync_handler.include_tool:
-            for msg in all_messages:
-                if get_role(msg) in _TOOL_ROLES:
-                    tool_text = extract_content_text(get_content(msg)).strip()
-                    if tool_text:
-                        await self._classify(
-                            tool_text,
-                            run_id,
-                            HookLabel.TOOL_RESPONSE,
-                            tool_name=getattr(msg, "name", None),
-                        )
 
     async def on_llm_start(
         self,
@@ -394,7 +384,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
-        if FirewallHook.TOOL_START not in self._sync_handler._enabled_hooks:
+        if not self._sync_handler.include_tool or FirewallHook.TOOL_START not in self._sync_handler._enabled_hooks:
             return
         text = extract_text_from_tool_input(input_str)
         if text:
@@ -427,7 +417,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END])
 
     async def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        if FirewallHook.TOOL_END not in self._sync_handler._enabled_hooks:
+        if not self._sync_handler.include_tool or FirewallHook.TOOL_END not in self._sync_handler._enabled_hooks:
             return
         text = str(output).strip()
         if text:

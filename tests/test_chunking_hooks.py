@@ -23,5 +23,5 @@ def test_hooks_and_helpers():
     assert prepend_hook("text", HookLabel.UNKNOWN) == "text"
     assert prepend_tool_name("text", "read_file") == "[TOOL:read_file] text"
     assert prepend_tool_name("text", None) == "text"
-    assert resolve_hooks(None) == {FirewallHook.LLM_START, FirewallHook.CHAT_MODEL_START}
+    assert resolve_hooks(None) == {FirewallHook.LLM_START, FirewallHook.CHAT_MODEL_START, FirewallHook.TOOL_START, FirewallHook.TOOL_END}
     assert FIREWALL_HOOK_TO_LABEL[FirewallHook.TOOL_END] == HookLabel.TOOL_RESPONSE
