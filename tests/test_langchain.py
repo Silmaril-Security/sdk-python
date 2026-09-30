@@ -88,6 +88,21 @@ def test_langchain_tool_hooks_have_distinct_request_ids(monkeypatch):
     } for call in calls)
 
 
+@pytest.mark.asyncio
+async def test_tool_opt_out_skips_sync_and_async_hooks(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    calls = []
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: calls.append(text))
+    run_id = uuid4()
+    sync_handler = fw.as_langchain_handler(include_tool=False)
+    sync_handler.on_tool_start({"name": "search"}, "deny call", run_id=run_id)
+    sync_handler.on_tool_end("deny result", run_id=run_id, name="search")
+    async_handler = fw.as_async_langchain_handler(include_tool=False)
+    await async_handler.on_tool_start({"name": "search"}, "deny call", run_id=run_id)
+    await async_handler.on_tool_end("deny result", run_id=run_id, name="search")
+    assert calls == []
+
+
 def test_langchain_explicit_governance_block(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     monkeypatch.setattr(

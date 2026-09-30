@@ -60,6 +60,39 @@ def test_sync_boundaries_continue_without_leaking(monkeypatch):
     assert any(event.hook == HookLabel.TOOL_CALL and event.blocked for event in events)
 
 
+def test_latest_user_is_checked_after_assistant_and_tool_messages(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    seen = []
+
+    def raw(text, **kwargs):
+        seen.append((text, kwargs["hook"]))
+        return BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    middleware = create_deepagents_middleware(fw)
+    request = _request([HumanMessage("deny input"), AIMessage("intermediate"), ToolMessage("safe", tool_call_id="call-1")])
+    called = []
+    result = middleware.wrap_model_call(request, lambda _: called.append(True))
+    assert result.content == SAFE_OUTPUT_MESSAGE
+    assert called == []
+    assert seen[0] == ("deny input", HookLabel.USER_INPUT)
+
+
+def test_denial_cap_resets_on_new_user_turn(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("BENIGN", 0.1, 0.5, mode="block"))
+    middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    history = [
+        HumanMessage("first"),
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),
+        HumanMessage("new safe request"),
+        ToolMessage("safe result", tool_call_id="call-3"),
+    ]
+    request = _request(history)
+    assert middleware.wrap_model_call(request, lambda _: AIMessage("allowed")).content == "allowed"
+
+
 def test_warn_reports_without_replacing_content(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     monkeypatch.setattr(
@@ -71,6 +104,22 @@ def test_warn_reports_without_replacing_content(monkeypatch):
     request = _request([HumanMessage("unsafe")])
     assert middleware.wrap_model_call(request, lambda _: AIMessage("original output")).content == "original output"
     assert events and all(event.blocked and event.mode == "warn" for event in events)
+
+
+@pytest.mark.parametrize("mode", ["warn", "shadow"])
+def test_observation_mode_does_not_apply_denial_cap(monkeypatch, mode):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    monkeypatch.setattr(
+        fw, "_classify_raw",
+        lambda text, **kwargs: BlockResult("MALICIOUS", 0.9, 0.5, mode=mode),
+    )
+    middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    messages = [
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),
+    ]
+    request = _request(messages)
+    assert middleware.wrap_model_call(request, lambda _: AIMessage("original output")).content == "original output"
 
 
 @pytest.mark.asyncio
@@ -100,6 +149,37 @@ async def test_async_boundaries(monkeypatch):
 
     result = await middleware.awrap_tool_call(request, tool_handler)
     assert result.content == SAFE_TOOL_MESSAGE and called == ["tool"]
+    await fw.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_latest_user_and_new_turn_cap(monkeypatch):
+    fw = AsyncFirewall(api_key="sk", api_url="https://example.com/classify")
+
+    async def raw(text, **kwargs):
+        return BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    request = _request([HumanMessage("deny input"), AIMessage("intermediate"), ToolMessage("safe", tool_call_id="call-1")])
+    called = []
+
+    async def handler(_):
+        called.append(True)
+        return AIMessage("allowed")
+
+    assert (await middleware.awrap_model_call(request, handler)).content == SAFE_OUTPUT_MESSAGE
+    assert called == []
+    request.messages = [
+        HumanMessage("first"),
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),
+        HumanMessage("new safe request"),
+        ToolMessage("safe result", tool_call_id="call-3"),
+    ]
+    request.state["messages"] = request.messages
+    assert (await middleware.awrap_model_call(request, handler)).content == "allowed"
+    assert called == [True]
     await fw.aclose()
 
 

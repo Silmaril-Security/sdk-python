@@ -187,7 +187,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
-        if FirewallHook.TOOL_START not in self._enabled_hooks:
+        if not self.include_tool or FirewallHook.TOOL_START not in self._enabled_hooks:
             return
         text = extract_text_from_tool_input(input_str)
         if text:
@@ -220,7 +220,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END])
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        if FirewallHook.TOOL_END not in self._enabled_hooks:
+        if not self.include_tool or FirewallHook.TOOL_END not in self._enabled_hooks:
             return
         text = str(output).strip()
         if text:
@@ -384,7 +384,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
-        if FirewallHook.TOOL_START not in self._sync_handler._enabled_hooks:
+        if not self._sync_handler.include_tool or FirewallHook.TOOL_START not in self._sync_handler._enabled_hooks:
             return
         text = extract_text_from_tool_input(input_str)
         if text:
@@ -417,7 +417,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END])
 
     async def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        if FirewallHook.TOOL_END not in self._sync_handler._enabled_hooks:
+        if not self._sync_handler.include_tool or FirewallHook.TOOL_END not in self._sync_handler._enabled_hooks:
             return
         text = str(output).strip()
         if text:

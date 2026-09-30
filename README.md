@@ -519,8 +519,10 @@ the graph consumes it. In Block mode, denied tool interactions become a fixed
 safe `ToolMessage` with the original call ID, so the agent can choose an
 allowed alternative. Repeated denials end with a fixed safe response. Denied
 model output is replaced. Shadow and Warn report decisions through
-`on_classify` without replacing content. Already emitted streaming text cannot
-be recalled.
+`on_classify` without replacing content. Classification errors allow model
+and tool execution by default; set `fail_open=False` in the middleware
+options to require a successful classification. Already emitted streaming text
+cannot be recalled.
 
 Pass `GovernanceContext(agent=..., resource=GovernanceResource(kind="tool", id=...))`
 as `governance=` to `classify()` or one context per item to `classify_batch()`.
