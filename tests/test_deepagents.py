@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("deepagents")
+
+from langchain.agents.middleware import ModelResponse
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from silmaril_security.sdk import AsyncFirewall, BlockResult, Firewall, HookLabel
+from silmaril_security.sdk.deepagents import (
+    SAFE_FINAL_MESSAGE,
+    SAFE_OUTPUT_MESSAGE,
+    SAFE_TOOL_MESSAGE,
+    create_deepagents_middleware,
+    create_protected_compiled_subagent,
+    create_protected_deep_agent,
+)
+
+
+def _request(messages=None, *, args=None):
+    state = {"messages": messages or []}
+    return SimpleNamespace(
+        messages=state["messages"], state=state,
+        runtime=SimpleNamespace(config={"run_id": "run-1"}),
+        tool_call={"id": "call-1", "name": "search", "args": args or {"query": "safe"}},
+    )
+
+
+def test_sync_boundaries_continue_without_leaking(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    events = []
+    seen = []
+
+    def raw(text, **kwargs):
+        seen.append((text, kwargs))
+        denied = "deny" in text
+        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    middleware = create_deepagents_middleware(fw, on_classify=events.append, max_blocked_attempts=2, conversation_id="conversation-1")
+    calls = []
+    request = _request([HumanMessage("hello")], args={"query": "deny"})
+    result = middleware.wrap_tool_call(request, lambda _: calls.append("ran"))
+    assert calls == []
+    assert result.content == SAFE_TOOL_MESSAGE and result.tool_call_id == "call-1"
+    request.tool_call["args"] = {"query": "safe"}
+    result = middleware.wrap_tool_call(request, lambda _: ToolMessage("deny result", tool_call_id="call-1"))
+    assert result.content == SAFE_TOOL_MESSAGE
+    request.state["messages"] = [result, ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2")]
+    assert middleware.wrap_model_call(request, lambda _: AIMessage("unreachable")).content == SAFE_FINAL_MESSAGE
+    request.state["messages"] = []
+    request.messages = [ToolMessage("safe", tool_call_id="call-1")]
+    assert middleware.wrap_model_call(request, lambda _: ModelResponse([AIMessage("deny output")])).result[0].content == SAFE_OUTPUT_MESSAGE
+    assert middleware.wrap_model_call(request, lambda _: AIMessage("allowed alternative")).content == "allowed alternative"
+    assert all(kwargs["metadata"]["conversationId"] == "conversation-1" for _, kwargs in seen)
+    assert len({kwargs["request_id"] for _, kwargs in seen}) == len(seen)
+    assert any(event.hook == HookLabel.TOOL_CALL and event.blocked for event in events)
+
+
+def test_warn_reports_without_replacing_content(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    monkeypatch.setattr(
+        fw, "_classify_raw",
+        lambda text, **kwargs: BlockResult("MALICIOUS", 0.9, 0.5, mode="warn"),
+    )
+    events = []
+    middleware = create_deepagents_middleware(fw, mode="warn", on_classify=events.append)
+    request = _request([HumanMessage("unsafe")])
+    assert middleware.wrap_model_call(request, lambda _: AIMessage("original output")).content == "original output"
+    assert events and all(event.blocked and event.mode == "warn" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_async_boundaries(monkeypatch):
+    fw = AsyncFirewall(api_key="sk", api_url="https://example.com/classify")
+
+    async def raw(text, **kwargs):
+        denied = "deny" in text
+        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    middleware = create_deepagents_middleware(fw)
+    request = _request([HumanMessage("deny input")])
+    called = []
+
+    async def model_handler(_):
+        called.append("model")
+        return AIMessage("safe")
+
+    assert (await middleware.awrap_model_call(request, model_handler)).content == SAFE_OUTPUT_MESSAGE
+    assert called == []
+    request.messages = [ToolMessage("safe", tool_call_id="call-1")]
+
+    async def tool_handler(_):
+        called.append("tool")
+        return ToolMessage("deny result", tool_call_id="call-1")
+
+    result = await middleware.awrap_tool_call(request, tool_handler)
+    assert result.content == SAFE_TOOL_MESSAGE and called == ["tool"]
+    await fw.aclose()
+
+
+def test_compiled_subagent_requires_protected_runnable():
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.raises(ValueError, match="Compiled subagents"):
+        create_protected_deep_agent(fw, subagents=[{"name": "compiled", "runnable": object()}])
+    forged = {"name": "compiled", "description": "Forged", "runnable": object()}
+    with pytest.raises(ValueError, match="create_protected_compiled_subagent"):
+        create_protected_deep_agent(fw, protected_compiled_subagents=[forged])
+
+
+def test_constructor_covers_root_general_and_declarative(monkeypatch):
+    import deepagents
+
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    captured = {}
+
+    def make(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(deepagents, "create_deep_agent", make)
+    create_protected_deep_agent(
+        fw, subagents=[{"name": "research", "description": "research"}],
+        model="test-model",
+    )
+    assert isinstance(captured["middleware"][-1], type(create_deepagents_middleware(fw)))
+    specs = {spec["name"]: spec for spec in captured["subagents"]}
+    assert specs["general-purpose"]["middleware"]
+    assert specs["research"]["middleware"]
+
+
+def test_compiled_subagent_is_bound_to_factory_and_firewall():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    other = Firewall(api_key="sk", api_url="https://example.com/classify")
+    spec = create_protected_compiled_subagent(
+        fw, name="compiled", description="Protected", model=Model(responses=[AIMessage("ok")]),
+    )
+    with pytest.raises(ValueError, match="this Firewall client"):
+        create_protected_deep_agent(other, protected_compiled_subagents=[spec])
+    with pytest.raises(ValueError, match="this Firewall client"):
+        create_protected_deep_agent(fw, protected_compiled_subagents=[{**spec, "runnable": object()}])
+
+
+def test_graph_continues_to_allowed_tool_after_denial(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.tools import tool
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+
+    def raw(text, **kwargs):
+        denied = "deny" in text
+        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    called = []
+
+    @tool
+    def search(query: str) -> str:
+        """Search for a query."""
+        called.append(query)
+        return "safe result"
+
+    model = Model(responses=[
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {"query": "deny"}, "id": "call-1"}]),
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {"query": "safe"}, "id": "call-2"}]),
+        AIMessage(content="done"),
+    ])
+    agent = create_protected_deep_agent(fw, model=model, tools=[search])
+    output = agent.invoke({"messages": [{"role": "user", "content": "hello"}]})
+    assert called == ["safe"]
+    assert [(m.tool_call_id, m.content) for m in output["messages"] if isinstance(m, ToolMessage)] == [
+        ("call-1", SAFE_TOOL_MESSAGE), ("call-2", "safe result")]
+
+
+@pytest.mark.parametrize("subagent_name", ["general-purpose", "research", "compiled"])
+def test_subagent_output_is_protected_in_graph(monkeypatch, subagent_name):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+
+    def raw(text, **kwargs):
+        denied = "deny" in text
+        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    root_responses = [
+        AIMessage(content="", tool_calls=[{
+            "name": "task", "args": {"description": "Summarize safe text", "subagent_type": subagent_name}, "id": "call-1",
+        }]),
+        AIMessage(content="done"),
+    ]
+    compiled_specs = []
+    if subagent_name == "compiled":
+        compiled_specs = [create_protected_compiled_subagent(
+            fw, name="compiled", description="Protected compiled",
+            model=Model(responses=[AIMessage(content="deny secret")]),
+        )]
+    else:
+        root_responses.insert(1, AIMessage(content="deny secret"))
+    agent = create_protected_deep_agent(
+        fw, model=Model(responses=root_responses),
+        subagents=[{"name": "research", "description": "Research"}],
+        protected_compiled_subagents=compiled_specs,
+    )
+    output = agent.invoke({"messages": [{"role": "user", "content": "hello"}]})
+    assert [(m.tool_call_id, m.content) for m in output["messages"] if isinstance(m, ToolMessage)] == [
+        ("call-1", SAFE_OUTPUT_MESSAGE)]
+
+
+@pytest.mark.asyncio
+async def test_async_graph_replaces_denied_output(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    fw = AsyncFirewall(api_key="sk", api_url="https://example.com/classify")
+
+    async def raw(text, **kwargs):
+        denied = "deny" in text
+        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    agent = create_protected_deep_agent(fw, model=Model(responses=[AIMessage(content="deny output")]))
+    output = await agent.ainvoke({"messages": [{"role": "user", "content": "hello"}]})
+    assert output["messages"][-1].content == SAFE_OUTPUT_MESSAGE
+    await fw.aclose()

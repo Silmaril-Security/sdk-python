@@ -2,6 +2,19 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.7.0 - 2026-09-30
+
+- Add optional Deep Agents middleware and protected constructors for root, general-purpose,
+  declarative, and explicitly protected compiled subagents. The compiled graph factory
+  records middleware installation and constructors reject unverified graphs.
+- Enforce input, tool-call, tool-result, and non-streamed model-output decisions in
+  Block mode with safe continuation and a repeated-denial cap. Shadow and Warn report
+  decisions without changing content.
+- Enable LangChain tool start/end callbacks by default, remove repeated history scans,
+  and emit unique classification request IDs with LangChain run IDs as correlation metadata.
+- Add typed governance request context and response decisions for single and batch calls,
+  including compatibility with older responses that omit governance.
+
 ## 0.6.1 - 2026-09-24
 
 - Add public `AsyncFirewall` single and batch classification with a persistent

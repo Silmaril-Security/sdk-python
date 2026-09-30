@@ -38,6 +38,7 @@ from silmaril_security.sdk.types import (
     ClassificationMetadata,
     ClassifyEvent,
     FirewallMode,
+    GovernanceContext,
 )
 
 if TYPE_CHECKING:
@@ -202,6 +203,7 @@ class AsyncFirewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
+        governance: GovernanceContext | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
@@ -214,6 +216,7 @@ class AsyncFirewall:
             hook=hook,
             tool_name=tool_name,
             metadata=metadata,
+            governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
         )
@@ -237,6 +240,7 @@ class AsyncFirewall:
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
+        governance: Sequence[GovernanceContext | None] | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
         request_id: str | None = None,
@@ -254,6 +258,7 @@ class AsyncFirewall:
             hooks=sent_hooks,
             tool_names=sent_tool_names,
             metadata=metadata,
+            governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
         )
@@ -295,6 +300,7 @@ class AsyncFirewall:
         hook: HookLabel | str | None = None,
         tool_name: str | None = None,
         metadata: ClassificationMetadata | None = None,
+        governance: GovernanceContext | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
     ) -> BlockResult:
@@ -303,6 +309,7 @@ class AsyncFirewall:
             hook=hook,
             tool_name=tool_name,
             metadata=metadata,
+            governance=governance,
             request_id=request_id,
             mode=mode,
         )
@@ -315,6 +322,7 @@ class AsyncFirewall:
         hooks: Sequence[HookLabel | str] | None = None,
         tool_names: Sequence[str | None] | None = None,
         metadata: Sequence[ClassificationMetadata | None] | None = None,
+        governance: Sequence[GovernanceContext | None] | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
     ) -> list[BlockResult]:
@@ -323,6 +331,7 @@ class AsyncFirewall:
             hooks=hooks,
             tool_names=tool_names,
             metadata=metadata,
+            governance=governance,
             request_id=request_id,
             mode=mode,
         )

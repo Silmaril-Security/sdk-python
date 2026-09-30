@@ -32,7 +32,12 @@ class FirewallHook(str, enum.Enum):
 
 
 DEFAULT_HOOKS: frozenset[FirewallHook] = frozenset(
-    {FirewallHook.LLM_START, FirewallHook.CHAT_MODEL_START}
+    {
+        FirewallHook.LLM_START,
+        FirewallHook.CHAT_MODEL_START,
+        FirewallHook.TOOL_START,
+        FirewallHook.TOOL_END,
+    }
 )
 
 INPUT_HOOKS: frozenset[FirewallHook] = frozenset(

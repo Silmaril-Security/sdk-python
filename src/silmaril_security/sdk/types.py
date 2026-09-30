@@ -14,6 +14,30 @@ from silmaril_security.sdk.outcomes import HarmfulOutcome, PrimaryOutcome
 Prediction = Literal["BENIGN", "MALICIOUS"]
 FirewallMode = Literal["shadow", "warn", "block"]
 ClassificationMetadata = Mapping[str, Any]
+GovernanceAction = Literal["allow", "block"]
+GovernanceResourceKind = Literal[
+    "agent", "tool", "mcp_server", "mcp_tool", "plugin", "skill", "extension"
+]
+
+
+@dataclass(frozen=True)
+class GovernanceResource:
+    kind: GovernanceResourceKind
+    id: str | None = None
+    parent_id: str | None = None
+
+
+@dataclass(frozen=True)
+class GovernanceContext:
+    agent: str | None = None
+    resource: GovernanceResource | None = None
+
+
+@dataclass(frozen=True)
+class GovernanceDecision:
+    action: GovernanceAction
+    policy_version: str
+    rule_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +53,7 @@ class BlockResult:
     detector_counts: dict[HarmfulOutcome, int] | None = None
     # None only when a legacy backend omitted mode and no override was requested.
     mode: FirewallMode | None = None
+    governance: GovernanceDecision | None = None
 
 
 @dataclass(frozen=True, init=False)

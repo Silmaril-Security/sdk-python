@@ -11,6 +11,7 @@ from silmaril_security.sdk import (
     ClassifyEvent,
     Firewall,
     FirewallBlockedException,
+    GovernanceDecision,
     HookLabel,
     SilmarilApiError,
 )
@@ -33,8 +34,8 @@ def test_langchain_handler_blocks_last_user_message(monkeypatch):
     handler = fw.as_langchain_handler(on_classify=events.append)
     calls = []
 
-    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
-        calls.append((text, hook, tool_name, request_id))
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
+        calls.append((text, hook, tool_name, request_id, metadata))
         return BlockResult(
             prediction="MALICIOUS",
             score=0.9,
@@ -59,16 +60,54 @@ def test_langchain_handler_blocks_last_user_message(monkeypatch):
             run_id=run_id,
         )
 
-    assert calls == [("second", HookLabel.USER_INPUT, None, str(run_id))]
+    assert len(calls) == 1
+    assert calls[0][:3] == ("second", HookLabel.USER_INPUT, None)
+    assert calls[0][3] != str(run_id)
+    assert calls[0][4] == {"langgraph": {"run_id": str(run_id)}}
     assert len(events) == 1
     assert events[0].blocked is True
+
+
+def test_langchain_tool_hooks_have_distinct_request_ids(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    calls = []
+
+    def raw(text, **kwargs):
+        calls.append((text, kwargs))
+        return BlockResult(prediction="BENIGN", score=0.1, threshold=0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    handler = fw.as_langchain_handler(conversation_id="conversation-1")
+    run_id = uuid4()
+    handler.on_tool_start({"name": "search"}, '{"query":"safe"}', run_id=run_id)
+    handler.on_tool_end("result", run_id=run_id, name="search")
+    assert [call[1]["hook"] for call in calls] == [HookLabel.TOOL_CALL, HookLabel.TOOL_RESPONSE]
+    assert calls[0][1]["request_id"] != calls[1][1]["request_id"]
+    assert all(call[1]["metadata"] == {
+        "langgraph": {"run_id": str(run_id)}, "conversationId": "conversation-1",
+    } for call in calls)
+
+
+def test_langchain_explicit_governance_block(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
+    monkeypatch.setattr(
+        fw, "_classify_raw",
+        lambda text, **kwargs: BlockResult(
+            prediction="BENIGN", score=0.1, threshold=0.5, mode="block",
+            governance=GovernanceDecision(action="block", policy_version="v2"),
+        ),
+    )
+    with pytest.raises(FirewallBlockedException):
+        fw.as_langchain_handler().on_tool_start(
+            {"name": "search"}, "safe", run_id=uuid4(),
+        )
 
 
 def test_langchain_handler_fail_open(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler()
 
-    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
         raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
@@ -110,7 +149,7 @@ def test_langchain_effective_warn_preserves_flow(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler(on_classify=events.append)
 
-    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
         return BlockResult(
             prediction="MALICIOUS",
             score=0.9,
@@ -134,7 +173,7 @@ def test_langchain_handler_fail_closed(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     handler = fw.as_langchain_handler(fail_open=False)
 
-    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None):
+    def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
         raise SilmarilApiError(status=500, status_text="Internal Server Error", body="boom")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
@@ -165,6 +204,7 @@ async def test_async_langchain_handler_supports_async_callback(monkeypatch):
         tool_name=None,
         request_id=None,
         mode=None,
+        metadata=None,
     ):
         return BlockResult(
             prediction="MALICIOUS",
@@ -222,7 +262,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
     assert payload["metadata"]["silmaril"] == {
         "sdk_language": "python",
-        "sdk_version": "0.6.1",
+        "sdk_version": "0.7.0",
         "request_id": "async-req",
     }
     assert "threshold" not in payload

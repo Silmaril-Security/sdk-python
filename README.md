@@ -40,7 +40,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.6.1
+pip install silmaril-security-sdk==0.7.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -60,6 +60,12 @@ Optional LangChain support:
 
 ```sh
 pip install "silmaril-security-sdk[langchain]"
+```
+
+Optional Deep Agents support (Python 3.11 or later):
+
+```sh
+pip install "silmaril-security-sdk[deepagents]"
 ```
 
 Native async support without LangChain:
@@ -466,6 +472,13 @@ model.invoke("Hello")
 
 The LangChain handler is fail-open by default: infrastructure errors are logged
 and the LLM call proceeds. Set `fail_open=False` to make API errors bubble up.
+Model-start, tool-start, and tool-end hooks are enabled by default; retriever
+hooks remain opt-in. The handler does not rescan tool messages in model history.
+Each event gets a distinct `metadata.silmaril.request_id`; its LangChain run ID
+is sent as `metadata.langgraph.run_id`. Pass `conversation_id=` to the handler
+when the backend should correlate a sequence; it sends
+`metadata.conversationId`. Callback blocks still raise
+`FirewallBlockedException`.
 
 Async LangChain:
 
@@ -477,6 +490,44 @@ Calling `as_async_langchain_handler()` on an `AsyncFirewall` shares its
 persistent pool. Calling it on a synchronous `Firewall` remains supported and
 uses a temporary async client for each handler classification. In both cases,
 handler `fail_open`, hook, run ID, blocking, and callback behavior is unchanged.
+
+## Deep Agents
+
+```python
+from silmaril_security.sdk.deepagents import create_protected_deep_agent
+
+agent = create_protected_deep_agent(
+    fw, model=model, tools=tools,
+    subagents=[{"name": "research", "description": "Research safely"}],
+    middleware_options={"conversation_id": conversation_id},
+)
+```
+
+The constructor installs checks on the root, general-purpose, and declarative
+subagents. Create a compiled subagent with
+`create_protected_compiled_subagent(fw, name="review", description="Review",
+model=model, tools=tools)` and pass its returned spec through
+`protected_compiled_subagents`. That factory installs middleware before
+compilation. The parent constructor verifies the exact graph and Firewall
+client; it rejects arbitrary compiled runnables. Root custom middleware is not
+automatically inherited by every subagent. Use `AsyncFirewall` with async
+graph execution; `Firewall` supports sync and async graph execution.
+
+The middleware checks user input before model use, tool calls before execution,
+tool results before the next model call, and non-streamed model output before
+the graph consumes it. In Block mode, denied tool interactions become a fixed
+safe `ToolMessage` with the original call ID, so the agent can choose an
+allowed alternative. Repeated denials end with a fixed safe response. Denied
+model output is replaced. Shadow and Warn report decisions through
+`on_classify` without replacing content. Already emitted streaming text cannot
+be recalled.
+
+Pass `GovernanceContext(agent=..., resource=GovernanceResource(kind="tool", id=...))`
+as `governance=` to `classify()` or one context per item to `classify_batch()`.
+The SDK sends it under `metadata.silmaril.governance`. `BlockResult.governance`
+contains the server action, policy version, and optional rule ID. A malicious
+prediction or explicit governance block is blocked in Block mode; older
+responses without governance remain valid.
 
 ## Retries
 
