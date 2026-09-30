@@ -21,6 +21,7 @@ try:
         ModelResponse,
     )
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langgraph.types import Command
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         'Deep Agents support requires pip install "silmaril-security-sdk[deepagents]"'
@@ -245,6 +246,22 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             additional_kwargs={"silmaril_blocked": _BLOCKED_TOOL_MARKER},
         )
 
+    def _allowed_tool_result(self, result: Any) -> Any:
+        if isinstance(result, ToolMessage) and result.additional_kwargs.get("silmaril_blocked") == _BLOCKED_TOOL_MARKER:
+            # Only this middleware may create denial markers. An allowed tool
+            # result that copies one must not count as a denied attempt.
+            return result.model_copy(update={
+                "additional_kwargs": {
+                    key: value for key, value in result.additional_kwargs.items()
+                    if key != "silmaril_blocked"
+                },
+            })
+        if isinstance(result, Command) and isinstance(result.update, dict):
+            messages = result.update.get("messages")
+            if isinstance(messages, list):
+                result.update["messages"] = [self._allowed_tool_result(message) for message in messages]
+        return result
+
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
         name = request.tool_call["name"]
         if self._classify(self._tool_text(request), HookLabel.TOOL_CALL, request, name):
@@ -252,7 +269,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         result = handler(request)
         if self._classify(str(result.content) if isinstance(result, ToolMessage) else str(result), HookLabel.TOOL_RESPONSE, request, name):
             return self._safe_tool_result(request)
-        return result
+        return self._allowed_tool_result(result)
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
         name = request.tool_call["name"]
@@ -261,7 +278,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         result = await handler(request)
         if await self._aclassify(str(result.content) if isinstance(result, ToolMessage) else str(result), HookLabel.TOOL_RESPONSE, request, name):
             return self._safe_tool_result(request)
-        return result
+        return self._allowed_tool_result(result)
 
 
 def create_deepagents_middleware(firewall: Firewall | AsyncFirewall, **kwargs: Any) -> SilmarilDeepAgentsMiddleware:
