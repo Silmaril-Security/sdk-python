@@ -29,6 +29,22 @@ def _request(messages=None, *, args=None):
     )
 
 
+def _blocked_tool_message(middleware, call_id: str):
+    request = _request(args={"query": "deny"})
+    request.tool_call["id"] = call_id
+    return middleware.wrap_tool_call(request, lambda _: ToolMessage("unreachable", tool_call_id=call_id))
+
+
+async def _ablocked_tool_message(middleware, call_id: str):
+    request = _request(args={"query": "deny"})
+    request.tool_call["id"] = call_id
+
+    async def handler(_):
+        return ToolMessage("unreachable", tool_call_id=call_id)
+
+    return await middleware.awrap_tool_call(request, handler)
+
+
 def test_sync_boundaries_continue_without_leaking(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     events = []
@@ -49,7 +65,7 @@ def test_sync_boundaries_continue_without_leaking(monkeypatch):
     request.tool_call["args"] = {"query": "safe"}
     result = middleware.wrap_tool_call(request, lambda _: ToolMessage("deny result", tool_call_id="call-1"))
     assert result.content == SAFE_TOOL_MESSAGE
-    request.state["messages"] = [result, ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2")]
+    request.state["messages"] = [result, _blocked_tool_message(middleware, "call-2")]
     assert middleware.wrap_model_call(request, lambda _: AIMessage("unreachable")).content == SAFE_FINAL_MESSAGE
     request.state["messages"] = []
     request.messages = [ToolMessage("safe", tool_call_id="call-1")]
@@ -83,32 +99,46 @@ def test_denial_cap_does_not_reclassify_safe_replacements(monkeypatch):
     seen = []
 
     def raw(text, **kwargs):
-        seen.append(text)
+        seen.append((text, kwargs["hook"]))
+        if kwargs["hook"] == HookLabel.TOOL_CALL:
+            return BlockResult("MALICIOUS", 0.9, 0.5, mode="block")
         return BlockResult("BENIGN", 0.1, 0.5, mode="warn")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
     request = _request([
-        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
-        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),
+        _blocked_tool_message(middleware, "call-1"),
+        _blocked_tool_message(middleware, "call-2"),
     ])
     assert middleware.wrap_model_call(request, lambda _: AIMessage("allowed")).content == SAFE_FINAL_MESSAGE
-    assert seen == []
+    assert len(seen) == 2
 
 
 def test_denial_cap_resets_on_new_user_turn(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
-    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("BENIGN", 0.1, 0.5, mode="block"))
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block"))
     middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
     history = [
         HumanMessage("first"),
-        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
-        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),
+        _blocked_tool_message(middleware, "call-1"),
+        _blocked_tool_message(middleware, "call-2"),
         HumanMessage("new safe request"),
         ToolMessage("safe result", tool_call_id="call-3"),
     ]
     request = _request(history)
     assert middleware.wrap_model_call(request, lambda _: AIMessage("allowed")).content == "allowed"
+
+
+def test_allowed_tool_text_matching_safe_message_does_not_count(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("BENIGN", 0.1, 0.5, mode="block"))
+    middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    request = _request()
+    allowed = middleware.wrap_tool_call(
+        request, lambda _: ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
+    )
+    history = [HumanMessage("safe input"), allowed, allowed]
+    assert middleware.wrap_model_call(_request(history), lambda _: AIMessage("allowed")).content == "allowed"
 
 
 def test_warn_reports_without_replacing_content(monkeypatch):
@@ -190,8 +220,8 @@ async def test_async_latest_user_and_new_turn_cap(monkeypatch):
     assert called == []
     request.messages = [
         HumanMessage("first"),
-        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
-        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),
+        await _ablocked_tool_message(middleware, "call-1"),
+        await _ablocked_tool_message(middleware, "call-2"),
         HumanMessage("new safe request"),
         ToolMessage("safe result", tool_call_id="call-3"),
     ]
@@ -282,6 +312,40 @@ def test_graph_continues_to_allowed_tool_after_denial(monkeypatch):
     assert called == ["safe"]
     assert [(m.tool_call_id, m.content) for m in output["messages"] if isinstance(m, ToolMessage)] == [
         ("call-1", SAFE_TOOL_MESSAGE), ("call-2", "safe result")]
+
+
+def test_graph_stops_after_repeated_denied_tool_calls(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.tools import tool
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    monkeypatch.setattr(
+        fw, "_classify_raw",
+        lambda text, **kwargs: BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block"),
+    )
+    called = []
+
+    @tool
+    def search(query: str) -> str:
+        """Search for a query."""
+        called.append(query)
+        return "safe result"
+
+    model = Model(responses=[
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {"query": "deny first"}, "id": "call-1"}]),
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {"query": "deny second"}, "id": "call-2"}]),
+        AIMessage(content="unreachable"),
+    ])
+    agent = create_protected_deep_agent(
+        fw, model=model, tools=[search], middleware_options={"max_blocked_attempts": 2},
+    )
+    output = agent.invoke({"messages": [{"role": "user", "content": "hello"}]})
+    assert called == []
+    assert output["messages"][-1].content == SAFE_FINAL_MESSAGE
 
 
 @pytest.mark.parametrize("subagent_name", ["general-purpose", "research", "compiled"])

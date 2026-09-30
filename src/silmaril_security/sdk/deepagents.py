@@ -75,6 +75,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         self.mode = firewall._effective_mode(mode, None)
         self.fail_open = fail_open
         self.max_blocked_attempts = max_blocked_attempts
+        self._blocked_marker = str(uuid4())
         self.conversation_id = conversation_id
         self.on_classify = on_classify
 
@@ -154,7 +155,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             -1,
         )
         return sum(
-            isinstance(message, ToolMessage) and message.content == SAFE_TOOL_MESSAGE
+            isinstance(message, ToolMessage)
+            and message.additional_kwargs.get("silmaril_blocked") == self._blocked_marker
             for message in messages[last_user_index + 1:]
         )
 
@@ -236,7 +238,11 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         return json.dumps(request.tool_call.get("args", {}), ensure_ascii=False, default=str)
 
     def _safe_tool_result(self, request: Any) -> ToolMessage:
-        return ToolMessage(content=SAFE_TOOL_MESSAGE, tool_call_id=request.tool_call["id"], name=request.tool_call["name"])
+        return ToolMessage(
+            content=SAFE_TOOL_MESSAGE, tool_call_id=request.tool_call["id"],
+            name=request.tool_call["name"],
+            additional_kwargs={"silmaril_blocked": self._blocked_marker},
+        )
 
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
         name = request.tool_call["name"]
