@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 from uuid import uuid4
-from weakref import ref
+from weakref import WeakValueDictionary, ref
 
 from silmaril_security.sdk.async_firewall import AsyncFirewall
 from silmaril_security.sdk.firewall import Firewall
@@ -31,6 +31,7 @@ SAFE_TOOL_MESSAGE = "Silmaril Firewall blocked this tool interaction. Choose a d
 SAFE_FINAL_MESSAGE = "Silmaril Firewall stopped this request after repeated unsafe actions."
 SAFE_OUTPUT_MESSAGE = "Silmaril Firewall blocked this response."
 _BLOCKED_TOOL_MARKER = "silmaril-firewall:v1:blocked-tool"
+_ISSUED_BLOCKED_MESSAGES: WeakValueDictionary[int, ToolMessage] = WeakValueDictionary()
 
 # Only graphs compiled by the factory below can be attached as protected.
 # Use object identity rather than graph equality; weak references clear stale IDs.
@@ -240,14 +241,20 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         return json.dumps(request.tool_call.get("args", {}), ensure_ascii=False, default=str)
 
     def _safe_tool_result(self, request: Any) -> ToolMessage:
-        return ToolMessage(
+        message = ToolMessage(
             content=SAFE_TOOL_MESSAGE, tool_call_id=request.tool_call["id"],
             name=request.tool_call["name"],
             additional_kwargs={"silmaril_blocked": _BLOCKED_TOOL_MARKER},
         )
+        _ISSUED_BLOCKED_MESSAGES[id(message)] = message
+        return message
 
     def _allowed_tool_result(self, result: Any) -> Any:
         if isinstance(result, ToolMessage) and result.additional_kwargs.get("silmaril_blocked") == _BLOCKED_TOOL_MARKER:
+            if _ISSUED_BLOCKED_MESSAGES.get(id(result)) is result:
+                # A second Silmaril middleware may wrap this same denied call.
+                # Preserve its marker so the model boundary counts the denial.
+                return result
             # Only this middleware may create denial markers. An allowed tool
             # result that copies one must not count as a denied attempt.
             return result.model_copy(update={

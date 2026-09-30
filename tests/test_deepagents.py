@@ -165,6 +165,35 @@ def test_allowed_tool_text_matching_safe_message_does_not_count(monkeypatch):
     assert "silmaril_blocked" not in returned.update["messages"][0].additional_kwargs
 
 
+def test_composed_middleware_keeps_genuine_denial_for_cap(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    tool_calls = iter((False, True, False, True))
+
+    def classify(text, **kwargs):
+        denied = kwargs["hook"] == HookLabel.TOOL_CALL and next(tool_calls)
+        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9, 0.5, mode="block")
+
+    monkeypatch.setattr(
+        fw, "_classify_raw",
+        classify,
+    )
+    inner = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    outer = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    history = []
+    for call_id in ("call-1", "call-2"):
+        request = _request()
+        request.tool_call = {"name": "search", "id": call_id, "args": {"query": "deny"}}
+        message = outer.wrap_tool_call(
+            request,
+            lambda nested_request: inner.wrap_tool_call(
+                nested_request, lambda _: ToolMessage("unreachable", tool_call_id=call_id)
+            ),
+        )
+        assert message.additional_kwargs["silmaril_blocked"] == "silmaril-firewall:v1:blocked-tool"
+        history.append(message)
+    assert outer.wrap_model_call(_request(history), lambda _: AIMessage("unreachable")).content == SAFE_FINAL_MESSAGE
+
+
 def test_warn_reports_without_replacing_content(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     monkeypatch.setattr(
