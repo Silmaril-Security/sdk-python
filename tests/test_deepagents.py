@@ -114,6 +114,16 @@ def test_denial_cap_does_not_reclassify_safe_replacements(monkeypatch):
     assert len(seen) == 2
 
 
+def test_denial_cap_survives_agent_reconstruction(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block"))
+    first = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    original = [_blocked_tool_message(first, "call-1"), _blocked_tool_message(first, "call-2")]
+    restored = [ToolMessage(m.content, tool_call_id=m.tool_call_id, additional_kwargs=dict(m.additional_kwargs)) for m in original]
+    resumed = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    assert resumed.wrap_model_call(_request(restored), lambda _: AIMessage("unreachable")).content == SAFE_FINAL_MESSAGE
+
+
 def test_denial_cap_resets_on_new_user_turn(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block"))

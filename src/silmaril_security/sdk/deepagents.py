@@ -29,6 +29,7 @@ except ImportError as exc:  # pragma: no cover
 SAFE_TOOL_MESSAGE = "Silmaril Firewall blocked this tool interaction. Choose a different safe action."
 SAFE_FINAL_MESSAGE = "Silmaril Firewall stopped this request after repeated unsafe actions."
 SAFE_OUTPUT_MESSAGE = "Silmaril Firewall blocked this response."
+_BLOCKED_TOOL_MARKER = "silmaril-firewall:v1:blocked-tool"
 
 # Only graphs compiled by the factory below can be attached as protected.
 # Use object identity rather than graph equality; weak references clear stale IDs.
@@ -75,7 +76,6 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         self.mode = firewall._effective_mode(mode, None)
         self.fail_open = fail_open
         self.max_blocked_attempts = max_blocked_attempts
-        self._blocked_marker = str(uuid4())
         self.conversation_id = conversation_id
         self.on_classify = on_classify
 
@@ -156,7 +156,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         )
         return sum(
             isinstance(message, ToolMessage)
-            and message.additional_kwargs.get("silmaril_blocked") == self._blocked_marker
+            and message.content == SAFE_TOOL_MESSAGE
+            and message.additional_kwargs.get("silmaril_blocked") == _BLOCKED_TOOL_MARKER
             for message in messages[last_user_index + 1:]
         )
 
@@ -241,7 +242,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         return ToolMessage(
             content=SAFE_TOOL_MESSAGE, tool_call_id=request.tool_call["id"],
             name=request.tool_call["name"],
-            additional_kwargs={"silmaril_blocked": self._blocked_marker},
+            additional_kwargs={"silmaril_blocked": _BLOCKED_TOOL_MARKER},
         )
 
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
