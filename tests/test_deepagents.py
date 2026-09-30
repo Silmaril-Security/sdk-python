@@ -78,6 +78,24 @@ def test_latest_user_is_checked_after_assistant_and_tool_messages(monkeypatch):
     assert seen[0] == ("deny input", HookLabel.USER_INPUT)
 
 
+def test_denial_cap_does_not_reclassify_safe_replacements(monkeypatch):
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    seen = []
+
+    def raw(text, **kwargs):
+        seen.append(text)
+        return BlockResult("BENIGN", 0.1, 0.5, mode="warn")
+
+    monkeypatch.setattr(fw, "_classify_raw", raw)
+    middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    request = _request([
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
+        ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),
+    ])
+    assert middleware.wrap_model_call(request, lambda _: AIMessage("allowed")).content == SAFE_FINAL_MESSAGE
+    assert seen == []
+
+
 def test_denial_cap_resets_on_new_user_turn(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("BENIGN", 0.1, 0.5, mode="block"))
@@ -113,7 +131,7 @@ def test_observation_mode_does_not_apply_denial_cap(monkeypatch, mode):
         fw, "_classify_raw",
         lambda text, **kwargs: BlockResult("MALICIOUS", 0.9, 0.5, mode=mode),
     )
-    middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
+    middleware = create_deepagents_middleware(fw, mode=mode, max_blocked_attempts=2)
     messages = [
         ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-1"),
         ToolMessage(SAFE_TOOL_MESSAGE, tool_call_id="call-2"),

@@ -164,24 +164,6 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             "",
         )
 
-    def _cap_mode(self, request: ModelRequest, input_mode: FirewallMode | None) -> FirewallMode | None:
-        if input_mode is not None:
-            return input_mode
-        messages = request.state.get("messages", [])
-        latest = request.messages[-1] if request.messages else (messages[-1] if messages else None)
-        if isinstance(latest, ToolMessage):
-            return self._classify_decision(str(latest.content), HookLabel.TOOL_RESPONSE, request).mode
-        return None
-
-    async def _acap_mode(self, request: ModelRequest, input_mode: FirewallMode | None) -> FirewallMode | None:
-        if input_mode is not None:
-            return input_mode
-        messages = request.state.get("messages", [])
-        latest = request.messages[-1] if request.messages else (messages[-1] if messages else None)
-        if isinstance(latest, ToolMessage):
-            return (await self._aclassify_decision(str(latest.content), HookLabel.TOOL_RESPONSE, request)).mode
-        return None
-
     def _filter_output(self, response: Any, request: ModelRequest) -> Any:
         if isinstance(response, ExtendedModelResponse):
             if response.command is not None and self._classify(
@@ -233,7 +215,10 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         input_decision = self._classify_decision(self._input(request), HookLabel.USER_INPUT, request)
         if input_decision.enforce:
             return AIMessage(content=SAFE_OUTPUT_MESSAGE)
-        if self._blocked_count(request) >= self.max_blocked_attempts and self._cap_mode(request, input_decision.mode) == "block":
+        # Safe tool messages are emitted only for Block decisions; do not
+        # reclassify their fixed text to decide whether to cap those denials.
+        cap_mode = input_decision.mode or self.mode or "block"
+        if self._blocked_count(request) >= self.max_blocked_attempts and cap_mode == "block":
             return AIMessage(content=SAFE_FINAL_MESSAGE)
         return self._filter_output(handler(request), request)
 
@@ -241,7 +226,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         input_decision = await self._aclassify_decision(self._input(request), HookLabel.USER_INPUT, request)
         if input_decision.enforce:
             return AIMessage(content=SAFE_OUTPUT_MESSAGE)
-        if self._blocked_count(request) >= self.max_blocked_attempts and await self._acap_mode(request, input_decision.mode) == "block":
+        cap_mode = input_decision.mode or self.mode or "block"
+        if self._blocked_count(request) >= self.max_blocked_attempts and cap_mode == "block":
             return AIMessage(content=SAFE_FINAL_MESSAGE)
         return await self._afilter_output(await handler(request), request)
 
