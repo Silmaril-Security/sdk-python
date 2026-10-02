@@ -7,29 +7,46 @@ of an integration with Silmaril services.
 
 ## Development
 
-Use Python 3.10 or later.
+Use Python 3.10 or later. Pull-request CI in `.github/workflows/ci.yml` tests
+3.10, 3.11, 3.12, and 3.13.
 
 ```sh
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev,langchain]"
 ```
 
-Run the local release checks before opening a PR:
+Install the extras that CI installs for your interpreter. The `dev` extra
+provides `build`, `pytest`, `pytest-asyncio`, `ruff`, and `twine`.
 
 ```sh
-python -m pytest -q -m "not integration"
-python -m ruff check src tests
-rm -rf dist build src/*.egg-info
+# Python 3.10
+python -m pip install -e ".[dev,langchain]"
+
+# Python 3.11 and later, including the release workflow's Python 3.12 job
+python -m pip install -e ".[dev,langchain,deepagents]"
+```
+
+Run the pull-request checks:
+
+```sh
+ruff check src tests
+pytest -q
 python -m build
 python -m twine check dist/*
 ```
 
-Integration tests under `tests/integ` call a deployed Silmaril Firewall
-endpoint and require tenant credentials. Keep those tests marked with
-`@pytest.mark.integration` so default CI and local release checks do not call
-live infrastructure.
+Remove a previous `dist/`, `build/`, or `src/*.egg-info` before `python -m build`
+when the checkout is being reused. CI starts from a clean runner.
+
+`.github/workflows/release.yml` uses Python 3.12 and runs `ruff check src tests`,
+then `python -m pytest -q -m "not integration"`, then `python -m build` and
+`python -m twine check dist/*`. This repository has no
+`tests/integ` tree, `pyproject.toml` does not register an `integration`
+marker, and no current test uses that mark. Pull-request CI runs `pytest -q`
+with no marker filter. A test that calls a deployed Firewall must skip unless
+the caller opts in, and must be marked `@pytest.mark.integration` so the
+release job excludes it.
 
 ## Pull Requests
 
