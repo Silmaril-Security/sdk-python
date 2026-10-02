@@ -25,7 +25,8 @@ This SDK provides the low-level Python interface for that workflow:
 - Honor backend threat and governance decisions and effective Shadow, Warn, or
   Block behavior.
 - Send each complete sanitized event in one request.
-- Preserve exact `metadata.conversationId` sequence identity and add one event ID.
+- On individual `classify()` calls, preserve exact `metadata.conversationId`
+  as sequence identity and add one event ID.
 - Retry transient API Gateway and model-serving failures.
 - Optionally attach the firewall to LangChain callback flows.
 
@@ -137,7 +138,7 @@ except FirewallBlockedException as exc:
 
 `AsyncFirewall` has the same classification options, results, modes, callbacks,
 and blocking exceptions as `Firewall`. It keeps one pooled `httpx.AsyncClient`
-for concurrent calls:
+for concurrent calls on independent events or different conversations:
 
 ```python
 import os
@@ -153,9 +154,11 @@ async with AsyncFirewall(
     results = await fw.classify_batch([text1, text2])
 ```
 
-One `AsyncFirewall` can be shared safely by concurrent tasks on one event loop.
-It binds to the first running loop that uses it and rejects use from another
-loop or after `aclose()`.
+One `AsyncFirewall` can be shared safely by concurrent tasks on one event loop
+when those tasks classify independent events or different conversations. For
+one conversation, await ordered individual `classify()` calls and finish each
+call before sending the next event. The client binds to the first running loop
+that uses it and rejects use from another loop or after `aclose()`.
 
 `aclose()` shuts down gracefully: new classifications are rejected immediately,
 requests that are already sending or waiting to retry are allowed to finish, and
@@ -173,8 +176,9 @@ callback runs after its request finishes, so closing from a callback works.
 coroutine. `Firewall` calls a synchronous callback. Both log callback
 exceptions and keep the classification verdict.
 
-For synchronous off-thread work, create one `Firewall` per worker thread.
-Neither client promises sharing across threads or event loops.
+For synchronous off-thread work, create one `Firewall` per worker thread and
+use those threads for independent events or different conversations. Neither
+client promises sharing across threads or event loops.
 
 ## Options
 
@@ -395,12 +399,14 @@ The SDK preserves caller metadata and adds a reserved `metadata.silmaril`
 namespace to every request. SDK-controlled fields are `sdk_language`,
 `sdk_version`, and `request_id`. `classify()` and `classify_batch()` accept
 `request_id=`; otherwise each call generates one id. A batch writes that same
-id on every item and sets zero-based `input_index`. Exact
-`metadata.conversationId` is preserved as the backend sequence identity. No
-aliases are inspected. If callers provide `metadata["silmaril"]`, it must be
+id on every item and sets zero-based `input_index`. On an individual
+`classify()` call, exact `metadata.conversationId` is preserved as the backend
+sequence identity, and `metadata.silmaril.request_id` is the event identity.
+No aliases are inspected. If callers provide `metadata["silmaril"]`, it must be
 an object and SDK-reserved keys are overwritten by the SDK.
 
-Batch calls accept one metadata object per text. The metadata list must match
+Batch calls accept one metadata object per text and preserve that per-item
+metadata, including `metadata.conversationId`. The metadata list must match
 the number of texts; use `None` for entries without metadata:
 
 ```python
@@ -413,6 +419,13 @@ fw.classify_batch(
     ],
 )
 ```
+
+Current Cascade treats each batch input independently and neither reads nor
+updates conversation history. Giving items the same `metadata.conversationId`
+does not connect them into a sequence. For conversation-aware checks, send
+complete events through ordered individual `classify()` calls with the same
+`metadata.conversationId`, and wait for each call before sending the next
+event for that conversation.
 
 ## Errors
 
@@ -430,8 +443,16 @@ All SDK exception types are regular Python exceptions and can be handled with
 ## Complete events
 
 `classify()` removes unpaired Unicode surrogates and sends the full logical
-event once. The backend owns token-window processing and sequence ordering.
-`classify_batch()` continues to send independent stateless texts as one batch.
+event once. For those individual calls, the backend owns token-window
+processing. Sequence ordering applies when those events share
+`metadata.conversationId`. Wait for each `classify()` call to finish before
+sending the next event for that conversation.
+
+`classify_batch()` sends each text as an independent input in one request.
+Batch items still preserve per-item metadata, including
+`metadata.conversationId`, but current Cascade neither reads nor updates
+conversation history for those items. The same `metadata.conversationId` on
+multiple items does not connect them into a sequence.
 
 ## Batch Classification
 
@@ -456,9 +477,17 @@ else:
 ```
 
 Batch requests carry one SDK metadata object per item so the backend can apply
-tenant-owned thresholding. Hook, tool-name, and metadata arrays must match the
-number of texts. Thresholds are not accepted as a client option or per-call
-batch override.
+tenant-owned thresholding. Each item preserves its metadata, including
+`metadata.conversationId`. Current Cascade treats each input independently and
+neither reads nor updates conversation history. Giving items the same
+`metadata.conversationId` does not connect them into a sequence. Hook,
+tool-name, and metadata arrays must match the number of texts. Thresholds are
+not accepted as a client option or per-call batch override.
+
+For conversation-aware checks, send complete events through ordered individual
+`classify()` calls with the same `metadata.conversationId`. Wait for each call
+before sending the next event for that conversation. Concurrent `classify()`
+calls are appropriate for independent events or different conversations.
 
 ## Migration Notes
 
