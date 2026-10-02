@@ -576,9 +576,11 @@ stays valid and leaves `BlockResult.governance` as `None`. A response
 
 Transient transport failures and HTTP 408, 429, 500, 502, 503, and 504
 responses are retried with exponential backoff (`min(2**attempt, 30)` seconds)
-up to `max_retries` times (default 5). A parseable `Retry-After` delay replaces
-that backoff for the attempt. Unparseable or negative `Retry-After` values fall
-back to the exponential delay.
+up to `max_retries` times (default 5). A non-negative integer or future
+HTTP-date `Retry-After` replaces that backoff. A negative integer or
+unparseable value falls back to the exponential delay. A valid HTTP date
+already in the past waits zero seconds. Sync and async clients share this
+parser.
 
 ## Development
 
