@@ -22,7 +22,7 @@ This SDK provides the low-level Python interface for that workflow:
 - Classify user input, tool calls, tool responses, model output, or system
   prompt content.
 - Preserve hook and tool-name context for more accurate decisions.
-- Enforce backend-owned adaptive thresholds and effective Shadow, Warn, or
+- Honor backend threat and governance decisions and effective Shadow, Warn, or
   Block behavior.
 - Send each complete sanitized event in one request.
 - Preserve exact `metadata.conversationId` sequence identity and add one event ID.
@@ -284,14 +284,15 @@ Outcome taxonomy:
 ## Backend Thresholding
 
 Customers do not tune score thresholds in the SDK. The SDK does not send
-`threshold` in request payloads. The Firewall backend owns the applied
-threshold, which remains available on `BlockResult.threshold` and exception
-objects as diagnostic metadata.
+`threshold` in request payloads. The Firewall backend owns the threat decision
+and threshold policy. The current Cascade backend resolves decision thresholds
+from a tenant default or a hook-specific override; it does not raise them as
+text length, token-window count, batch size, or conversation length grows.
 
-Firewall source defaults are `base_threshold=0.5`, `target_sequence_fpr=0.01`,
-and `max_adaptive_threshold=0.9`. Tenant configuration can override them. With
-those defaults, 1 scoring opportunity uses `0.5`, 2 use about `0.6661`, 5 use
-about `0.8328`, and 10 or more are capped at `0.9`.
+Returned `threshold` fields on `BlockResult` and blocking exceptions are
+backend diagnostic metadata. Disabled and observe policy paths can retain the
+compatibility threshold, so those fields are not always the applied tenant
+threshold.
 
 ## Modes
 
