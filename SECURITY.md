@@ -16,8 +16,9 @@ enabled for this repository, or through your existing private Silmaril support
 channel. Include:
 
 - Affected SDK version and Python version
-- Impacted integration surface, such as core client, LangChain handler, chunking,
-  retries, packaging, or release automation
+- Impacted integration surface, such as the core client, async client, LangChain
+  handler, Deep Agents middleware, governance, retries, packaging, or release
+  automation
 - Reproduction steps or a minimal proof of concept
 - Whether any credentials, tenant IDs, endpoint URLs, or customer data were
   exposed
@@ -28,6 +29,7 @@ privately. Public disclosure should wait until a fix or mitigation is available.
 ## Secrets and Test Data
 
 Never commit API keys, tenant endpoint URLs, `.env` files, generated
-distributions, or live customer payloads. Integration tests that require live
-tenant credentials must remain opt-in and marked with
-`@pytest.mark.integration`.
+distributions, or live customer payloads. This repository has no live
+integration suite. A test that calls a deployed Firewall must skip unless the
+caller opts in, and must be marked `@pytest.mark.integration`. Pull-request CI
+runs `pytest -q` with no marker filter; the release workflow skips that marker.

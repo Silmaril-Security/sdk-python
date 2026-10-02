@@ -56,19 +56,19 @@ The distribution name is `silmaril-security-sdk`. The SDK import path is
 `silmaril_security.sdk`, so call sites use `Firewall`, `HookLabel`, and
 `FirewallBlockedException` from that package.
 
-Optional LangChain support:
+Optional LangChain support. That extra installs `langchain-core>=0.2.0` and `httpx>=0.25.0`:
 
 ```sh
 pip install "silmaril-security-sdk[langchain]"
 ```
 
-Optional Deep Agents support (Python 3.11 or later):
+Optional Deep Agents support. On Python 3.11 or later that extra installs `deepagents>=0.7.21,<0.8` and `httpx>=0.25.0`. On Python 3.10 the environment marker skips the `deepagents` package.
 
 ```sh
 pip install "silmaril-security-sdk[deepagents]"
 ```
 
-Native async support without LangChain:
+Native async support installs `httpx>=0.25.0`, which is the module `AsyncFirewall` imports. The LangChain and Deep Agents extras install that same `httpx` floor.
 
 ```sh
 pip install "silmaril-security-sdk[async]"
@@ -169,14 +169,20 @@ closes once in-flight work finishes. If `http_client=` supplies an
 Closing from inside your own in-flight classification raises `RuntimeError`
 instead of tearing the pool out from under that request. An `on_classify`
 callback runs after its request finishes, so closing from a callback works.
+`AsyncFirewall` accepts a synchronous or coroutine `on_classify` and awaits a
+coroutine. `Firewall` calls a synchronous callback. Both log callback
+exceptions and keep the classification verdict.
 
 For synchronous off-thread work, create one `Firewall` per worker thread.
 Neither client promises sharing across threads or event loops.
 
 ## Options
 
+Both clients take keyword-only arguments.
+
 ```python
 Firewall(
+    *,
     api_key: str,                                  # required
     api_url: str,                                  # required
     timeout: float = 10.0,                         # request timeout in seconds
@@ -186,14 +192,28 @@ Firewall(
     session: requests.Session | None = None,       # optional custom requests session
     max_retries: int = 5,
 )
+
+AsyncFirewall(
+    *,
+    api_key: str,                                  # required
+    api_url: str,                                  # required
+    timeout: float = 10.0,
+    mode: Literal["shadow", "warn", "block"] | None = None,
+    shadow_mode: bool | None = None,
+    on_classify: Callable[[ClassifyEvent], Awaitable[None] | None] | None = None,
+    http_client: httpx.AsyncClient | None = None,  # caller-owned when provided
+    max_retries: int = 5,
+)
 ```
 
 `classify()` and `classify_batch()` return the server's prediction, score,
 backend threshold, and effective mode. When mode is omitted, the backend
-controls it. A malicious result raises a typed blocking exception only when the
-effective mode is `"block"`. A legacy mode-less response leaves
-`BlockResult.mode` as `None` when no override was requested; direct SDK calls
-retain their pre-0.6 Block default internally.
+controls it. A malicious prediction, or a governance action of `"block"`,
+raises a typed blocking exception only when the effective mode is `"block"`.
+A legacy mode-less response leaves `BlockResult.mode` as `None` when no
+override was requested; direct SDK calls retain their pre-0.6 Block default
+internally. Per-call `governance` and `request_id` are described under
+Governance and Request Metadata.
 
 When a custom `requests.Session` is provided, the SDK preserves it and adds the
 required `x-api-key` and `content-type` headers.
@@ -263,16 +283,15 @@ Outcome taxonomy:
 
 ## Backend Thresholding
 
-Customers do not tune score thresholds in the SDK. Tenant Firewall config owns
-the adaptive threshold schedule. The default backend config is
-`base_threshold=0.5`, `target_sequence_fpr=0.01`, and
-`max_adaptive_threshold=0.9`, which keeps the current schedule: 1 scoring
-opportunity uses `0.5`, 2 use about `0.6661`, 5 use about `0.8328`, and 10 or
-more are capped at `0.9`.
+Customers do not tune score thresholds in the SDK. The SDK does not send
+`threshold` in request payloads. The Firewall backend owns the applied
+threshold, which remains available on `BlockResult.threshold` and exception
+objects as diagnostic metadata.
 
-The SDK does not send `threshold` in request payloads. The backend owns the
-applied threshold, which remains available on
-`BlockResult.threshold` and exception objects as diagnostic metadata.
+Firewall source defaults are `base_threshold=0.5`, `target_sequence_fpr=0.01`,
+and `max_adaptive_threshold=0.9`. Tenant configuration can override them. With
+those defaults, 1 scoring opportunity uses `0.5`, 2 use about `0.6661`, 5 use
+about `0.8328`, and 10 or more are capped at `0.9`.
 
 ## Modes
 
@@ -332,8 +351,9 @@ fw.classify_batch(
 
 Legacy `shadow_mode=True` maps to Shadow and `shadow_mode=False` maps to Block;
 explicit `mode` takes precedence. `ClassifyEvent` includes `hook`, `tool_name`,
-`text`, `result`, `blocked`, `mode`, and `shadow_mode`. `blocked` records a
-malicious decision; only effective Block mode raises.
+`text`, `result`, `blocked`, `mode`, and `shadow_mode`. `blocked` is true for a
+malicious prediction or a governance action of `"block"`. Only effective Block
+mode raises.
 
 ## Hook Labels
 
@@ -372,11 +392,12 @@ fw.classify(
 
 The SDK preserves caller metadata and adds a reserved `metadata.silmaril`
 namespace to every request. SDK-controlled fields are `sdk_language`,
-`sdk_version`, and `request_id`; batches additionally carry `input_index` for
-diagnostics and remain stateless. Exact `metadata.conversationId` is preserved
-as the backend sequence identity. No aliases are inspected. If callers provide
-`metadata["silmaril"]`, it must be an object and SDK-reserved keys are
-overwritten by the SDK.
+`sdk_version`, and `request_id`. `classify()` and `classify_batch()` accept
+`request_id=`; otherwise each call generates one id. A batch writes that same
+id on every item and sets zero-based `input_index`. Exact
+`metadata.conversationId` is preserved as the backend sequence identity. No
+aliases are inspected. If callers provide `metadata["silmaril"]`, it must be
+an object and SDK-reserved keys are overwritten by the SDK.
 
 Batch calls accept one metadata object per text. The metadata list must match
 the number of texts; use `None` for entries without metadata:
@@ -394,12 +415,13 @@ fw.classify_batch(
 
 ## Errors
 
-- `SilmarilApiError`: raised when the firewall API responds with a non-2xx or redirect status. Carries `status`, `status_text`, and a 64 KiB-capped `body`; the default exception message omits the body to keep logs clean.
-- `FirewallBlockedException`: raised by `classify()` when a malicious decision has effective Block mode. Carries `score`, `threshold`, `prompt_text`, `hook`, `tool_name`, and `result`.
-- `BatchFirewallBlockedException`: raised by `classify_batch()` when one or more malicious inputs have effective Block mode. Carries all blocked items with index, text, hook, tool name, and result.
+- `SilmarilApiError`: raised when the firewall API responds with status 300 or higher, including redirects (`allow_redirects=False` / `follow_redirects=False`). Status 408, 429, 500, 502, 503, and 504 are retried first and raise this error once retries are exhausted. Carries `status`, `status_text`, and a 64 KiB-capped `body`; the default exception message omits the body.
+- `FirewallBlockedException`: raised by `classify()` and by LangChain handlers when a malicious prediction or a governance `"block"` has effective Block mode. Carries `score`, `threshold`, `prompt_text`, `hook`, `tool_name`, and `result`. LangChain handlers set `run_id`; direct client calls leave it `None`.
+- `BatchFirewallBlockedException`: raised by `classify_batch()` when one or more items are blocked under effective Block mode. Carries `blocked` (index, text, hook, tool name, and result for each blocked item) and `results` (the full batch).
 
-`PromptBlockedException` and `BatchPromptBlockedException` remain as deprecated
-aliases for one release.
+`PromptBlockedException` and `BatchPromptBlockedException` remain deprecated
+exports in 0.7.0. At runtime they are the same objects as
+`FirewallBlockedException` and `BatchFirewallBlockedException`.
 
 All SDK exception types are regular Python exceptions and can be handled with
 `except` clauses.
@@ -446,8 +468,7 @@ release line.
 
 The `0.4.x` line moves all threshold decisions to Firewall tenant/backend
 config, adds SDK reconstruction metadata, and renames blocking exceptions to
-`FirewallBlockedException` and `BatchFirewallBlockedException`. Deprecated
-`PromptBlockedException` aliases remain available for one release.
+`FirewallBlockedException` and `BatchFirewallBlockedException`.
 
 ## LangChain
 
@@ -472,13 +493,17 @@ model.invoke("Hello")
 
 The LangChain handler is fail-open by default: infrastructure errors are logged
 and the LLM call proceeds. Set `fail_open=False` to make API errors bubble up.
-Model-start, tool-start, and tool-end hooks are enabled by default; retriever
-hooks remain opt-in. The handler does not rescan tool messages in model history.
-Each event gets a distinct `metadata.silmaril.request_id`; its LangChain run ID
-is sent as `metadata.langgraph.run_id`. Pass `conversation_id=` to the handler
-when the backend should correlate a sequence; it sends
-`metadata.conversationId`. Callback blocks still raise
-`FirewallBlockedException`.
+Default hooks are `on_llm_start`, `on_chat_model_start`, `on_tool_start`, and
+`on_tool_end`. `on_llm_end`, `on_retriever_start`, and `on_retriever_end` run
+only when `hooks=` includes them. `include_tool=False` skips tool start and
+end even if those hooks are enabled. `include_system` is stored and unused
+when the handler selects text. Model start classifies the latest user message
+and leaves earlier tool messages for the tool hooks. Each callback gets a
+distinct `metadata.silmaril.request_id`; its LangChain run ID is sent as
+`metadata.langgraph.run_id`. Pass `conversation_id=` when the backend should
+correlate a sequence; the handler sends `metadata.conversationId`. Handlers
+classify without a `GovernanceContext`. A governance `"block"` on the response
+still raises `FirewallBlockedException` in Block mode.
 
 Async LangChain:
 
@@ -514,41 +539,64 @@ automatically inherited by every subagent. Use `AsyncFirewall` with async
 graph execution; `Firewall` supports sync and async graph execution.
 
 The middleware checks user input before model use, tool calls before execution,
-tool results before the next model call, and non-streamed model output before
-the graph consumes it. In Block mode, denied tool interactions become a fixed
-safe `ToolMessage` with the original call ID, so the agent can choose an
-allowed alternative. Repeated denials end with a fixed safe response. Denied
-model output is replaced. Shadow and Warn report decisions through
-`on_classify` without replacing content. Classification errors allow model
-and tool execution by default; set `fail_open=False` in the middleware
-options to require a successful classification. Already emitted streaming text
-cannot be recalled.
+tool results before the next model call, and model output returned from
+`wrap_model_call` / `awrap_model_call`. Model streaming has no wrapper in this
+middleware.
 
-Pass `GovernanceContext(agent=..., resource=GovernanceResource(kind="tool", id=...))`
-as `governance=` to `classify()` or one context per item to `classify_batch()`.
-The SDK sends it under `metadata.silmaril.governance`. `BlockResult.governance`
-contains the server action, policy version, and optional rule ID. A malicious
-prediction or explicit governance block is blocked in Block mode; older
-responses without governance remain valid.
+In Block mode, a denied tool call or tool result becomes a fixed safe
+`ToolMessage` that keeps the original tool call ID, so the agent can choose an
+allowed alternative. After `max_blocked_attempts` denied tool interactions in
+the current user turn (default 3), the next Block-mode model call returns a
+fixed safe final response instead of calling the model. Denied model output
+from the non-streaming wrapper is replaced. Shadow and Warn report decisions
+through `on_classify` without replacing content or applying that cap.
+Classification errors allow model and tool execution by default; set
+`fail_open=False` in `middleware_options` to require a successful
+classification. The middleware classifies with `governance=None`. A governance
+`"block"` on the response is still enforced in Block mode.
+
+## Governance
+
+Pass `GovernanceContext` as `governance=` to `classify()`, or one context per
+item to `classify_batch()`. The batch list must match the number of texts; use
+`None` for an item with no context. Typed `GovernanceResource.kind` values are
+`agent`, `tool`, `mcp_server`, `mcp_tool`, `plugin`, `skill`, and `extension`.
+Passing `governance=` overwrites a caller-supplied
+`metadata.silmaril.governance`. The SDK writes that object and omits unset
+`agent`, `resource.id`, and `resource.parent_id`. A resource always includes
+`resource.kind`. A context with neither agent nor resource sends `{}`.
+`BlockResult.governance` carries `action` (`allow` or `block`),
+`policy_version`, and optional `rule_id`. A response that omits `governance`
+stays valid and leaves `BlockResult.governance` as `None`. A response
+`governance` value that is not an object, uses an action other than `allow` or
+`block`, has an empty `policy_version`, or has a non-string `rule_id` raises
+`ValueError` before enforcement.
 
 ## Retries
 
 Transient transport failures and HTTP 408, 429, 500, 502, 503, and 504
-responses are retried with exponential backoff capped at 30s, up to 5 times.
-`Retry-After` is honored when present.
+responses are retried with exponential backoff (`min(2**attempt, 30)` seconds)
+up to `max_retries` times (default 5). A parseable `Retry-After` delay replaces
+that backoff for the attempt. Unparseable or negative `Retry-After` values fall
+back to the exponential delay.
 
 ## Development
 
-Run the full local check before opening a PR:
+Pull-request CI is `.github/workflows/ci.yml`. Python 3.10 installs
+`.[dev,langchain]`; Python 3.11, 3.12, and 3.13 install
+`.[dev,langchain,deepagents]`. The job then runs:
 
 ```sh
-pip install -e ".[dev,langchain]"
-python -m pytest -q -m "not integration"
-python -m ruff check src tests
-rm -rf dist build src/*.egg-info
+ruff check src tests
+pytest -q
 python -m build
 python -m twine check dist/*
 ```
+
+The release workflow uses Python 3.12 and the Deep Agents install above. It
+runs `ruff check src tests`, then `python -m pytest -q -m "not integration"`,
+then `python -m build` and `python -m twine check dist/*`. Local setup and the
+live-endpoint rule are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Publishing
 
