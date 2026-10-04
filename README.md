@@ -41,7 +41,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.7.0
+pip install silmaril-security-sdk==0.7.1
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -219,8 +219,10 @@ override was requested; direct SDK calls retain their pre-0.6 Block default
 internally. Per-call `governance` and `request_id` are described under
 Governance and Request Metadata.
 
-When a custom `requests.Session` is provided, the SDK preserves it and adds the
-required `x-api-key` and `content-type` headers.
+When a custom `requests.Session` is provided, the SDK sends its `x-api-key`
+and `content-type` headers on each Firewall request without modifying the
+session's default headers. Sharing that session with other clients does not
+make the Firewall API key a default for their requests.
 
 ## Handle Outcomes
 

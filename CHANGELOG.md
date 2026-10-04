@@ -2,6 +2,12 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.7.1 - 2026-10-04
+
+- Keep API keys on individual Firewall requests instead of mutating a caller-owned
+  requests session's default headers. Preserve shared-session isolation through
+  retries and batch classification.
+
 ## 0.7.0 - 2026-09-30
 
 - Add optional Deep Agents middleware and protected constructors for root, general-purpose,
