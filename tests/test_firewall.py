@@ -63,11 +63,49 @@ class FakeResponse:
         return self._body
 
 
+class RecordingAdapter(requests.adapters.BaseAdapter):
+    def __init__(self, responses: list[tuple[int, dict[str, Any] | str]]) -> None:
+        self.responses = responses
+        self.requests: list[requests.PreparedRequest] = []
+
+    def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
+        self.requests.append(request)
+        status_code, body = self.responses.pop(0)
+        response = requests.Response()
+        response.status_code = status_code
+        response.request = request
+        response.url = request.url
+        response._content = (
+            json.dumps(body).encode() if isinstance(body, dict) else body.encode()
+        )
+        return response
+
+    def close(self) -> None:
+        pass
+
+
 def test_constructor_requires_key_and_url():
     with pytest.raises(ValueError, match="api_key is required"):
         Firewall(api_key="", api_url=TEST_API_URL)
     with pytest.raises(ValueError, match="api_url is required"):
         Firewall(api_key="sk", api_url="")
+
+
+def test_constructor_preserves_session_defaults_and_unrelated_request_headers():
+    session = requests.Session()
+    session.headers["X-Custom-Default"] = "preserved"
+    original_headers = dict(session.headers)
+
+    fw = Firewall(api_key="sk-test", api_url=TEST_API_URL, session=session)
+    unrelated = session.prepare_request(
+        requests.Request("GET", "https://unrelated.test.invalid/resource")
+    )
+
+    assert fw._session is session
+    assert dict(session.headers) == original_headers
+    assert unrelated.headers["X-Custom-Default"] == "preserved"
+    assert "x-api-key" not in unrelated.headers
+    assert "content-type" not in unrelated.headers
 
 
 def test_deprecated_exception_names_alias_new_names():
@@ -98,9 +136,11 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         threshold=0.5,
         mode="block",
     )
-    assert fw._session.headers["x-api-key"] == "sk-test"
-    assert fw._session.headers["content-type"] == "application/json"
     assert calls[0]["url"] == TEST_API_URL
+    assert calls[0]["headers"] == {
+        "x-api-key": "sk-test",
+        "content-type": "application/json",
+    }
     assert calls[0]["timeout"] == 10.0
     assert calls[0]["allow_redirects"] is False
     assert calls[0]["stream"] is True
@@ -116,6 +156,49 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
             }
         },
     }
+
+
+def test_shared_session_uses_client_headers_for_batch_and_retries(monkeypatch):
+    benign = {"prediction": "BENIGN", "score": 0.12, "threshold": 0.5}
+    adapter = RecordingAdapter(
+        [
+            (200, benign),
+            (200, {"predictions": [benign, benign]}),
+            (429, "rate limited"),
+            (200, benign),
+            (200, benign),
+        ]
+    )
+    session = requests.Session()
+    session.headers["X-Custom-Default"] = "preserved"
+    original_headers = dict(session.headers)
+    session.mount("https://api.test.invalid/", adapter)
+    first = Firewall(api_key="sk-first", api_url=TEST_API_URL, session=session)
+    second = Firewall(api_key="sk-second", api_url=TEST_API_URL, session=session)
+    monkeypatch.setattr("silmaril_security.sdk.firewall.time.sleep", lambda _delay: None)
+
+    first.classify("first")
+    second.classify_batch(["batch-a", "batch-b"])
+    first.classify("retry")
+    second.classify("second")
+
+    assert [request.headers["x-api-key"] for request in adapter.requests] == [
+        "sk-first",
+        "sk-second",
+        "sk-first",
+        "sk-first",
+        "sk-second",
+    ]
+    assert all(
+        request.headers["content-type"] == "application/json" for request in adapter.requests
+    )
+    assert all(
+        request.headers["X-Custom-Default"] == "preserved" for request in adapter.requests
+    )
+    assert json.loads(adapter.requests[1].body)["texts"] == ["batch-a", "batch-b"]
+    assert json.loads(adapter.requests[2].body)["text"] == "retry"
+    assert json.loads(adapter.requests[3].body)["text"] == "retry"
+    assert dict(session.headers) == original_headers
 
 
 def test_classify_posts_metadata_when_provided(monkeypatch):

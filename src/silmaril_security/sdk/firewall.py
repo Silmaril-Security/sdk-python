@@ -368,12 +368,6 @@ class Firewall:
         self.on_classify = on_classify
         self.max_retries = max_retries
         self._session = session or requests.Session()
-        self._session.headers.update(
-            {
-                "x-api-key": self.api_key,
-                "content-type": "application/json",
-            }
-        )
 
     def classify(
         self,
@@ -552,6 +546,10 @@ class Firewall:
                 response = self._session.post(
                     self.api_url,
                     data=body,
+                    headers={
+                        "x-api-key": self.api_key,
+                        "content-type": "application/json",
+                    },
                     timeout=self.timeout,
                     allow_redirects=False,
                     stream=True,
