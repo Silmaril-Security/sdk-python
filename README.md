@@ -22,8 +22,8 @@ This SDK provides the low-level Python interface for that workflow:
 - Classify user input, tool calls, tool responses, model output, or system
   prompt content.
 - Preserve hook and tool-name context for more accurate decisions.
-- Honor backend threat and governance decisions and effective Shadow, Warn, or
-  Block behavior.
+- Honor backend threat and governance decisions while applying Shadow, Warn,
+  or Block behavior.
 - Send each complete sanitized event in one request.
 - On individual `classify()` calls, preserve exact `metadata.conversationId`
   as sequence identity and add one event ID.
@@ -211,13 +211,15 @@ AsyncFirewall(
 ```
 
 `classify()` and `classify_batch()` return the server's prediction, score,
-backend threshold, and effective mode. When mode is omitted, the backend
-controls it. A malicious prediction, or a governance action of `"block"`,
-raises a typed blocking exception only when the effective mode is `"block"`.
-A legacy mode-less response leaves `BlockResult.mode` as `None` when no
-override was requested; direct SDK calls retain their pre-0.6 Block default
-internally. Per-call `governance` and `request_id` are described under
-Governance and Request Metadata.
+backend threshold, and `BlockResult.mode`. Current Firewall responses omit
+`mode`, so omitting a client and per-call mode does not select a
+backend-configured mode: `BlockResult.mode` remains `None`, while direct SDK
+calls retain their pre-0.6 Block enforcement fallback internally. Set
+`mode="shadow"` or `mode="warn"` explicitly for observation without a blocking
+exception. A malicious prediction, or a governance action of `"block"`, raises
+a typed blocking exception only when the locally effective mode is `"block"`.
+Per-call `governance` and `request_id` are described under Governance and
+Request Metadata.
 
 When a custom `requests.Session` is provided, the SDK sends its `x-api-key`
 and `content-type` headers on each Firewall request without modifying the
@@ -302,17 +304,22 @@ threshold.
 
 ## Modes
 
-Use `"shadow"`, `"warn"`, or `"block"` only when a request needs to override
-the backend-configured mode. Shadow and Warn preserve the caller flow; Block
-raises `FirewallBlockedException` or `BatchFirewallBlockedException` for a
-malicious decision. Current backends return the effective mode on every result
-and event.
+Set `"shadow"`, `"warn"`, or `"block"` on the client, an individual call, or
+an adapter to select enforcement behavior explicitly. Shadow and Warn preserve
+the caller flow; Block raises `FirewallBlockedException` or
+`BatchFirewallBlockedException` for a malicious decision. Current Firewall
+services do not return an effective mode, so callers must not rely on omitted
+`mode` to use backend mode configuration.
 
-During a rolling upgrade, an explicit request mode remains authoritative if a
-legacy or mixed-version backend omits or disagrees about `mode`. When both the
-request and response omit it, `BlockResult.mode` remains `None`; integrations
-can retain their pre-0.6 behavior without falsely reporting a backend Block
-mode. Direct SDK enforcement retains its pre-0.6 Block default.
+An explicit client, per-call, or adapter mode is locally authoritative if a
+response omits or conflicts with it. When both the request and response omit
+`mode`, `BlockResult.mode` remains `None`; direct Python calls retain their
+pre-0.6 Block enforcement fallback without reporting a backend Block mode. The
+bundled LangChain handlers and Deep Agents middleware also currently fall back
+to Block when neither side supplies a mode. Configure Shadow or Warn
+explicitly for observation instead of depending on an implicit mode. A future
+compatible service that returns `mode` can supply it when no explicit override
+was requested; this is not current Firewall behavior.
 
 ```python
 import logging
