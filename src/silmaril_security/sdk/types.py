@@ -51,7 +51,7 @@ class BlockResult:
     outcome_scores: dict[HarmfulOutcome, float] | None = None
     detector_scores: dict[HarmfulOutcome, float] | None = None
     detector_counts: dict[HarmfulOutcome, int] | None = None
-    # None only when a legacy backend omitted mode and no override was requested.
+    # None when the response omits mode and no explicit override was requested.
     mode: FirewallMode | None = None
     governance: GovernanceDecision | None = None
 
