@@ -2,6 +2,15 @@
 
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
+## 0.7.2 - 2026-10-12
+
+- Preserve non-empty outcome labels introduced by future Firewall versions in
+  primary outcomes and score/count maps while keeping known-taxonomy guards exact.
+  Continue rejecting malformed labels, invalid numeric map values, and `benign`
+  harmful-map keys.
+- Correct the current mode documentation: omitted response mode remains unset while
+  direct SDK calls retain their compatibility Block fallback for enforcement.
+
 ## 0.7.1 - 2026-10-04
 
 - Keep API keys on individual Firewall requests instead of mutating a caller-owned

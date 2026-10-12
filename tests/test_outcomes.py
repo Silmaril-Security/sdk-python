@@ -42,20 +42,37 @@ def test_outcome_validation_helpers():
     assert is_primary_outcome(OUTCOME_BENIGN)
     assert is_harmful_outcome(OUTCOME_SECRET_EXPOSURE)
     assert not is_harmful_outcome(OUTCOME_BENIGN)
+    assert not is_primary_outcome("future_outcome")
+    assert not is_harmful_outcome("future_outcome")
     assert normalize_primary_outcome(OUTCOME_BENIGN) == OUTCOME_BENIGN
     assert normalize_harmful_outcome(OUTCOME_SECRET_EXPOSURE) == OUTCOME_SECRET_EXPOSURE
+    assert normalize_primary_outcome(" future_primary ") == " future_primary "
+    assert normalize_harmful_outcome(" future_harmful ") == " future_harmful "
     assert normalize_harmful_outcome_float_map(
-        {OUTCOME_SECRET_EXPOSURE: 0.8}, "outcome_scores"
-    ) == {OUTCOME_SECRET_EXPOSURE: 0.8}
+        {OUTCOME_SECRET_EXPOSURE: 0.8, "future_harmful": 0.2}, "outcome_scores"
+    ) == {OUTCOME_SECRET_EXPOSURE: 0.8, "future_harmful": 0.2}
     assert normalize_harmful_outcome_int_map(
-        {OUTCOME_SECRET_EXPOSURE: 2}, "detector_counts"
-    ) == {OUTCOME_SECRET_EXPOSURE: 2}
+        {OUTCOME_SECRET_EXPOSURE: 2, "future_harmful": 1}, "detector_counts"
+    ) == {OUTCOME_SECRET_EXPOSURE: 2, "future_harmful": 1}
+
+
+@pytest.mark.parametrize("value", [None, 1, "", " ", "\t\n"])
+def test_outcome_normalizers_reject_malformed_labels(value):
     with pytest.raises(ValueError, match="invalid primary_outcome"):
-        normalize_primary_outcome("unknown")
+        normalize_primary_outcome(value)
+    with pytest.raises(ValueError, match="invalid outcome"):
+        normalize_harmful_outcome(value)
+
+
+def test_harmful_outcomes_reject_benign_and_malformed_maps():
+    with pytest.raises(ValueError, match="invalid outcome"):
+        normalize_harmful_outcome(OUTCOME_BENIGN)
     with pytest.raises(ValueError, match="invalid outcome_scores key"):
-        normalize_harmful_outcome_float_map({"unknown": 0.8}, "outcome_scores")
+        normalize_harmful_outcome_float_map({OUTCOME_BENIGN: 0.8}, "outcome_scores")
     with pytest.raises(ValueError, match="invalid detector_counts key"):
-        normalize_harmful_outcome_int_map({"unknown": 1}, "detector_counts")
+        normalize_harmful_outcome_int_map({"": 1}, "detector_counts")
+    with pytest.raises(ValueError, match="invalid outcome_scores"):
+        normalize_harmful_outcome_float_map(["future_harmful"], "outcome_scores")
     with pytest.raises(ValueError, match="invalid outcome_scores value"):
         normalize_harmful_outcome_float_map({OUTCOME_SECRET_EXPOSURE: "N/A"}, "outcome_scores")
     with pytest.raises(ValueError, match="expected number"):

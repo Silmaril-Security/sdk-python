@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Literal, cast
+from typing import Literal, TypeAlias
 
 PrimaryOutcome = Literal[
     "benign",
@@ -35,6 +35,9 @@ HarmfulOutcome = Literal[
     "clickup_terms_violation",
     "traditional_ai_abuse",
 ]
+
+PrimaryOutcomeValue: TypeAlias = PrimaryOutcome | str
+HarmfulOutcomeValue: TypeAlias = HarmfulOutcome | str
 
 OUTCOME_BENIGN: PrimaryOutcome = "benign"
 OUTCOME_INFORMATION_DISCLOSURE: HarmfulOutcome = "information_disclosure"
@@ -138,33 +141,39 @@ def is_harmful_outcome(value: str) -> bool:
     return value in _HARMFUL_OUTCOMES_SET
 
 
-def normalize_primary_outcome(value: object, field_name: str = "primary_outcome") -> PrimaryOutcome:
-    """Validate and return a canonical primary outcome."""
+def normalize_primary_outcome(
+    value: object,
+    field_name: str = "primary_outcome",
+) -> PrimaryOutcomeValue:
+    """Validate and preserve a primary outcome, including future labels."""
 
-    if not isinstance(value, str) or not is_primary_outcome(value):
+    if not isinstance(value, str) or not value.strip():
         raise ValueError(f"Firewall: invalid {field_name} {value!r}")
-    return cast(PrimaryOutcome, value)
+    return value
 
 
-def normalize_harmful_outcome(value: object, field_name: str = "outcome") -> HarmfulOutcome:
-    """Validate and return a canonical harmful outcome."""
+def normalize_harmful_outcome(
+    value: object,
+    field_name: str = "outcome",
+) -> HarmfulOutcomeValue:
+    """Validate and preserve a harmful outcome, including future labels."""
 
-    if not isinstance(value, str) or not is_harmful_outcome(value):
+    if not isinstance(value, str) or not value.strip() or value == OUTCOME_BENIGN:
         raise ValueError(f"Firewall: invalid {field_name} {value!r}")
-    return cast(HarmfulOutcome, value)
+    return value
 
 
 def normalize_harmful_outcome_float_map(
     value: object,
     field_name: str,
-) -> dict[HarmfulOutcome, float] | None:
+) -> dict[HarmfulOutcomeValue, float] | None:
     """Validate a backend harmful-outcome score map."""
 
     if value is None:
         return None
     if not isinstance(value, Mapping):
         raise ValueError(f"Firewall: invalid {field_name} {value!r}")
-    result: dict[HarmfulOutcome, float] = {}
+    result: dict[HarmfulOutcomeValue, float] = {}
     for key, raw in value.items():
         outcome_key = normalize_harmful_outcome(key, f"{field_name} key")
         if not isinstance(raw, (int, float)) or isinstance(raw, bool):
@@ -183,14 +192,14 @@ def normalize_harmful_outcome_float_map(
 def normalize_harmful_outcome_int_map(
     value: object,
     field_name: str,
-) -> dict[HarmfulOutcome, int] | None:
+) -> dict[HarmfulOutcomeValue, int] | None:
     """Validate a backend harmful-outcome count map."""
 
     if value is None:
         return None
     if not isinstance(value, Mapping):
         raise ValueError(f"Firewall: invalid {field_name} {value!r}")
-    result: dict[HarmfulOutcome, int] = {}
+    result: dict[HarmfulOutcomeValue, int] = {}
     for key, raw in value.items():
         outcome_key = normalize_harmful_outcome(key, f"{field_name} key")
         if not isinstance(raw, int) or isinstance(raw, bool):
