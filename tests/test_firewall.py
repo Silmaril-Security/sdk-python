@@ -151,7 +151,7 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         "metadata": {
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.7.1",
+                "sdk_version": "0.7.2",
                 "request_id": "req-test",
             }
         },
@@ -235,7 +235,7 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
             },
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.7.1",
+                "sdk_version": "0.7.2",
                 "request_id": "req-meta",
             },
         },
@@ -550,7 +550,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
                 "langgraph": {"run_id": "run-a"},
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.7.1",
+                    "sdk_version": "0.7.2",
                     "request_id": "batch-req",
                     "input_index": 0,
                 },
@@ -558,7 +558,7 @@ def test_classify_batch_serializes_metadata(monkeypatch):
             {
                 "silmaril": {
                     "sdk_language": "python",
-                    "sdk_version": "0.7.1",
+                    "sdk_version": "0.7.2",
                     "request_id": "batch-req",
                     "input_index": 1,
                 }
@@ -637,7 +637,7 @@ def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
             "conversation_id": "inert",
             "silmaril": {
                 "sdk_language": "python",
-                "sdk_version": "0.7.1",
+                "sdk_version": "0.7.2",
                 "request_id": "event-uuid",
             },
         },
@@ -684,45 +684,123 @@ def test_optional_outcome_fields(monkeypatch):
     assert result.detector_counts == {OUTCOME_SECRET_EXPOSURE: 2}
 
 
-def test_rejects_unknown_outcome_fields(monkeypatch):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+@pytest.mark.parametrize("mode", ["warn", "shadow"])
+def test_preserves_future_outcome_fields_for_nonblocking_modes(monkeypatch, mode):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    future = "future_policy_violation"
 
-    responses = iter(
-        [
-            {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5, "primary_outcome": "unknown"},
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
             {
                 "prediction": "MALICIOUS",
                 "score": 0.91,
                 "threshold": 0.5,
-                "outcome_scores": {"unknown": 0.8},
+                "primary_outcome": future,
+                "outcome_scores": {future: 0.8},
+                "detector_scores": {future: 1.0},
+                "detector_counts": {future: 2},
             },
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "detector_scores": {"unknown": 0.8},
-            },
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "detector_counts": {"unknown": 1},
-            },
-        ]
+        ),
     )
 
-    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, next(responses))
+    result = fw.classify("future attack", mode=mode)
 
-    monkeypatch.setattr(fw._session, "post", fake_post)
+    assert result.primary_outcome == future
+    assert result.outcome_scores == {future: 0.8}
+    assert result.detector_scores == {future: 1.0}
+    assert result.detector_counts == {future: 2}
 
-    with pytest.raises(ValueError, match="invalid primary_outcome"):
-        fw.classify("x")
-    with pytest.raises(ValueError, match="invalid outcome_scores key"):
-        fw.classify("x")
-    with pytest.raises(ValueError, match="invalid detector_scores key"):
-        fw.classify("x")
-    with pytest.raises(ValueError, match="invalid detector_counts key"):
+
+def test_future_outcome_explicit_block_raises_with_result(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    future = "future_policy_violation"
+
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "primary_outcome": future,
+            },
+        ),
+    )
+
+    with pytest.raises(FirewallBlockedException) as exc_info:
+        fw.classify("future attack", mode="block")
+
+    assert exc_info.value.result.primary_outcome == future
+
+
+def test_batch_preserves_and_enforces_future_outcomes(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    future = "future_policy_violation"
+
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
+            {
+                "predictions": [
+                    {
+                        "prediction": "MALICIOUS",
+                        "score": 0.91,
+                        "threshold": 0.5,
+                        "primary_outcome": future,
+                        "outcome_scores": {future: 0.8},
+                        "detector_scores": {future: 1.0},
+                        "detector_counts": {future: 2},
+                    }
+                ]
+            },
+        ),
+    )
+
+    results = fw.classify_batch(["future attack"], mode="warn")
+    assert results[0].primary_outcome == future
+    assert results[0].outcome_scores == {future: 0.8}
+
+    with pytest.raises(BatchFirewallBlockedException) as exc_info:
+        fw.classify_batch(["future attack"], mode="block")
+    assert exc_info.value.blocked[0].result.primary_outcome == future
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("primary_outcome", ""),
+        ("primary_outcome", " \t"),
+        ("primary_outcome", 7),
+        ("outcome_scores", {"benign": 0.8}),
+        ("detector_scores", {"": 0.8}),
+        ("detector_counts", {9: 1}),
+    ],
+)
+def test_rejects_malformed_outcome_fields(monkeypatch, field, value):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="shadow")
+
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
+            {
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                field: value,
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match=f"invalid {field}"):
         fw.classify("x")
 
 

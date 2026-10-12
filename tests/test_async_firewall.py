@@ -309,6 +309,118 @@ async def test_direct_async_callback_runs_before_block_and_failures_do_not_repla
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["warn", "shadow"])
+async def test_async_preserves_future_outcome_fields_for_nonblocking_modes(mode):
+    future = "future_policy_violation"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "primary_outcome": future,
+                "outcome_scores": {future: 0.8},
+                "detector_scores": {future: 1.0},
+                "detector_counts": {future: 2},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
+        result = await fw.classify("future attack", mode=mode)
+
+    assert result.primary_outcome == future
+    assert result.outcome_scores == {future: 0.8}
+    assert result.detector_scores == {future: 1.0}
+    assert result.detector_counts == {future: 2}
+
+
+@pytest.mark.asyncio
+async def test_async_future_outcome_explicit_block_raises_with_result():
+    future = "future_policy_violation"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "prediction": "MALICIOUS",
+                "score": 0.91,
+                "threshold": 0.5,
+                "primary_outcome": future,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
+        with pytest.raises(FirewallBlockedException) as exc_info:
+            await fw.classify("future attack", mode="block")
+
+    assert exc_info.value.result.primary_outcome == future
+
+
+@pytest.mark.asyncio
+async def test_async_batch_preserves_and_enforces_future_outcomes():
+    future = "future_policy_violation"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "predictions": [
+                    {
+                        "prediction": "MALICIOUS",
+                        "score": 0.91,
+                        "threshold": 0.5,
+                        "primary_outcome": future,
+                        "outcome_scores": {future: 0.8},
+                        "detector_scores": {future: 1.0},
+                        "detector_counts": {future: 2},
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
+        results = await fw.classify_batch(["future attack"], mode="shadow")
+        with pytest.raises(BatchFirewallBlockedException) as exc_info:
+            await fw.classify_batch(["future attack"], mode="block")
+
+    assert results[0].primary_outcome == future
+    assert results[0].detector_counts == {future: 2}
+    assert exc_info.value.blocked[0].result.primary_outcome == future
+
+
+@pytest.mark.asyncio
+async def test_async_batch_rejects_malformed_outcome_map():
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "predictions": [
+                    {
+                        "prediction": "MALICIOUS",
+                        "score": 0.91,
+                        "threshold": 0.5,
+                        "outcome_scores": {"benign": 0.8},
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
+        with pytest.raises(ValueError, match="invalid outcome_scores key"):
+            await fw.classify_batch(["malformed"], mode="shadow")
+
+
+@pytest.mark.asyncio
 async def test_async_handler_uses_supplied_async_firewall_pool_and_semantics(monkeypatch):
     pytest.importorskip("langchain_core.callbacks")
     events: list[ClassifyEvent] = []

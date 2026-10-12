@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from silmaril_security.sdk.hooks import HookLabel
-from silmaril_security.sdk.outcomes import HarmfulOutcome, PrimaryOutcome
+from silmaril_security.sdk.outcomes import HarmfulOutcomeValue, PrimaryOutcomeValue
 
 Prediction = Literal["BENIGN", "MALICIOUS"]
 FirewallMode = Literal["shadow", "warn", "block"]
@@ -47,10 +47,10 @@ class BlockResult:
     prediction: Prediction
     score: float
     threshold: float
-    primary_outcome: PrimaryOutcome | None = None
-    outcome_scores: dict[HarmfulOutcome, float] | None = None
-    detector_scores: dict[HarmfulOutcome, float] | None = None
-    detector_counts: dict[HarmfulOutcome, int] | None = None
+    primary_outcome: PrimaryOutcomeValue | None = None
+    outcome_scores: dict[HarmfulOutcomeValue, float] | None = None
+    detector_scores: dict[HarmfulOutcomeValue, float] | None = None
+    detector_counts: dict[HarmfulOutcomeValue, int] | None = None
     # None when the response omits mode and no explicit override was requested.
     mode: FirewallMode | None = None
     governance: GovernanceDecision | None = None
