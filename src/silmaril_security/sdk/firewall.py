@@ -35,6 +35,7 @@ from silmaril_security.sdk.types import (
     FirewallMode,
     GovernanceContext,
     GovernanceDecision,
+    GovernanceResource,
 )
 
 LOG = logging.getLogger("silmaril_security.sdk")
@@ -136,17 +137,31 @@ def _governance_decision_from_json(value: Any) -> GovernanceDecision | None:
     return GovernanceDecision(action=action, policy_version=version, rule_id=rule_id)
 
 
+def _governance_resource_to_wire(resource: GovernanceResource) -> dict[str, str]:
+    if resource.kind not in {
+        "agent", "tool", "mcp_server", "mcp_tool", "plugin", "skill", "extension"
+    }:
+        raise ValueError("Firewall: invalid governance resource kind")
+    if not isinstance(resource.id, str) or not resource.id.strip():
+        raise ValueError("Firewall: governance resource id must be a non-empty string")
+    if resource.kind == "mcp_tool":
+        if not isinstance(resource.parent_id, str) or not resource.parent_id.strip():
+            raise ValueError("Firewall: mcp_tool resource requires a non-empty parent_id")
+    elif resource.parent_id is not None:
+        raise ValueError("Firewall: parent_id is valid only for mcp_tool resources")
+    return {
+        "kind": resource.kind,
+        "id": resource.id,
+        **({"parent_id": resource.parent_id} if resource.parent_id is not None else {}),
+    }
+
+
 def _governance_context_to_wire(context: GovernanceContext) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if context.agent is not None:
         payload["agent"] = context.agent
     if context.resource is not None:
-        resource: dict[str, Any] = {"kind": context.resource.kind}
-        if context.resource.id is not None:
-            resource["id"] = context.resource.id
-        if context.resource.parent_id is not None:
-            resource["parent_id"] = context.resource.parent_id
-        payload["resource"] = resource
+        payload["resource"] = _governance_resource_to_wire(context.resource)
     return payload
 
 
@@ -245,6 +260,8 @@ def _single_payload(
         payload["hook"] = hook_str
     if tool_name:
         payload["tool_name"] = tool_name
+    if governance is not None and governance.resource is not None:
+        payload["resource"] = _governance_resource_to_wire(governance.resource)
     payload["metadata"] = _sdk_metadata(metadata, request_id=request_id, governance=governance)
     return payload
 
@@ -298,6 +315,12 @@ def _batch_payload(
         )
         for index in range(len(text_list))
     ]
+    if governance is not None:
+        payload["resources"] = [
+            _governance_resource_to_wire(context.resource)
+            if context is not None and context.resource is not None else None
+            for context in governance
+        ]
     return text_list, payload
 
 

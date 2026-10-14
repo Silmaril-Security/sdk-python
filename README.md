@@ -41,7 +41,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.7.2
+pip install silmaril-security-sdk==0.7.3
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -652,3 +652,15 @@ tag so a PyPI authentication failure does not leave another stale release tag.
 
 This SDK is source-available under the Silmaril SDK Source-Available License.
 It is not permissive open source. See [LICENSE](LICENSE).
+
+## Governance resource requests
+
+Typed governance resources are sent in the classify request's top-level
+`resource` field or aligned nullable `resources` array for batch calls. Resource
+IDs must be non-empty; MCP tools also require their canonical server parent ID.
+The compatibility metadata copy remains attribution only. Caller agent metadata
+does not supply an authenticated principal.
+
+This source prepares version 0.7.3. Its registry install command becomes
+available after the authorized main-branch release workflow publishes the package.
+Confirm registry publication before installing this version.
