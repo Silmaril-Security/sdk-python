@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3
+
+- Send typed governance resources in the runtime's top-level `resource` and
+  aligned `resources` fields, preserving compatibility attribution metadata.
+- Reject invalid canonical resource references before submitting a request.
+  Caller-supplied agent metadata remains attribution, not authenticated identity.
+
 All notable changes to the Silmaril Firewall Python SDK are documented here.
 
 ## 0.7.2 - 2026-10-12

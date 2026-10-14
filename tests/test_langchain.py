@@ -15,6 +15,7 @@ from silmaril_security.sdk import (
     HookLabel,
     SilmarilApiError,
 )
+from silmaril_security.sdk._version import VERSION
 
 pytest.importorskip("langchain_core.callbacks")
 
@@ -277,7 +278,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     assert payload["metadata"]["langgraph"] == {"run_id": "async-run"}
     assert payload["metadata"]["silmaril"] == {
         "sdk_language": "python",
-        "sdk_version": "0.7.2",
+        "sdk_version": VERSION,
         "request_id": "async-req",
     }
     assert "threshold" not in payload
