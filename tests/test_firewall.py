@@ -225,6 +225,90 @@ def test_classify_preserves_governance_response_evidence_and_legacy_shape():
     assert fw.classify("legacy").governance is None
 
 
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {},
+        {"resource": None, "identity_revision": None, "reason": None},
+    ],
+    ids=["omitted", "explicit-null"],
+)
+def test_governance_response_accepts_absent_optional_evidence(evidence):
+    adapter = RecordingAdapter(
+        [
+            (
+                200,
+                {
+                    "prediction": "BENIGN",
+                    "score": 0.1,
+                    "threshold": 0.5,
+                    "governance": {
+                        "action": "allow",
+                        "policy_version": "legacy-policy",
+                        "rule_id": "legacy-rule",
+                        **evidence,
+                    },
+                },
+            )
+        ]
+    )
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
+
+    result = fw.classify("optional evidence")
+
+    assert result.governance is not None
+    assert result.governance.action == "allow"
+    assert result.governance.policy_version == "legacy-policy"
+    assert result.governance.rule_id == "legacy-rule"
+    assert result.governance.resource is None
+    assert result.governance.identity_revision is None
+    assert result.governance.reason is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("identity_revision", 1),
+        ("identity_revision", {}),
+        ("identity_revision", ""),
+        ("identity_revision", " \t"),
+        ("reason", 1),
+        ("reason", {}),
+        ("reason", ""),
+        ("reason", " \t"),
+    ],
+)
+def test_governance_response_rejects_malformed_string_evidence(field, value):
+    adapter = RecordingAdapter(
+        [
+            (
+                200,
+                {
+                    "prediction": "BENIGN",
+                    "score": 0.1,
+                    "threshold": 0.5,
+                    "governance": {
+                        "action": "allow",
+                        "policy_version": "schema6",
+                        field: value,
+                    },
+                },
+            )
+        ]
+    )
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"response governance {field} must be a non-empty string",
+    ):
+        fw.classify("malformed evidence")
+
+
 @pytest.mark.parametrize("kind", [None, 1, [], {}])
 def test_governance_response_rejects_non_string_resource_kind(kind):
     adapter = RecordingAdapter([(200, {
