@@ -605,11 +605,15 @@ Passing `governance=` overwrites a caller-supplied
 `agent`, `resource.id`, and `resource.parent_id`. A resource always includes
 `resource.kind`. A context with neither agent nor resource sends `{}`.
 `BlockResult.governance` carries `action` (`allow` or `block`),
-`policy_version`, and optional `rule_id`. A response that omits `governance`
-stays valid and leaves `BlockResult.governance` as `None`. A response
-`governance` value that is not an object, uses an action other than `allow` or
-`block`, has an empty `policy_version`, or has a non-string `rule_id` raises
-`ValueError` before enforcement.
+`policy_version`, and optional `rule_id`. When the Firewall runtime supports
+schema 6 response evidence, the decision can also include the canonical
+`resource`, `identity_revision`, and `reason` for the decision. These fields
+are conditional on runtime support; omitted or null fields remain `None`, and
+future non-empty reason strings are preserved. A response that omits
+`governance` stays valid and leaves `BlockResult.governance` as `None`. A
+response `governance` value that is not an object, uses an action other than
+`allow` or `block`, has an empty `policy_version`, or has malformed optional
+evidence raises `ValueError` before enforcement.
 
 ## Retries
 
