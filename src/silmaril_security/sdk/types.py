@@ -38,6 +38,9 @@ class GovernanceDecision:
     action: GovernanceAction
     policy_version: str
     rule_id: str | None = None
+    resource: GovernanceResource | None = None
+    identity_revision: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)

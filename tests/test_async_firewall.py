@@ -16,6 +16,7 @@ from silmaril_security.sdk import (
     BatchFirewallBlockedException,
     ClassifyEvent,
     FirewallBlockedException,
+    GovernanceResource,
     HookLabel,
     SilmarilApiError,
 )
@@ -175,6 +176,60 @@ async def test_batch_is_one_ordered_request_and_preserves_block_details():
         HookLabel.USER_INPUT,
         "chat",
     )
+
+
+@pytest.mark.asyncio
+async def test_async_batch_preserves_full_governance_response_evidence():
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "predictions": [
+                    {
+                        "prediction": "BENIGN",
+                        "score": 0.0,
+                        "threshold": 0.5,
+                        "governance": {
+                            "action": "block",
+                            "policy_version": "schema6",
+                            "rule_id": "deny-github",
+                            "resource": {
+                                "kind": "mcp_tool",
+                                "id": "create_issue",
+                                "parent_id": "github",
+                            },
+                            "identity_revision": "catalog-9",
+                            "reason": "identity_unresolved",
+                        },
+                    },
+                    {
+                        "prediction": "BENIGN",
+                        "score": 0.0,
+                        "threshold": 0.5,
+                    },
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
+        results = await fw.classify_batch(["governed", "legacy"], mode="warn")
+        await fw.aclose()
+
+    decision = results[0].governance
+    assert decision is not None
+    assert decision.action == "block"
+    assert decision.policy_version == "schema6"
+    assert decision.rule_id == "deny-github"
+    assert decision.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="create_issue",
+        parent_id="github",
+    )
+    assert decision.identity_revision == "catalog-9"
+    assert decision.reason == "identity_unresolved"
+    assert results[1].governance is None
 
 
 @pytest.mark.asyncio

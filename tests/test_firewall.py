@@ -16,6 +16,7 @@ from silmaril_security.sdk import (
     ClassifyEvent,
     Firewall,
     FirewallBlockedException,
+    GovernanceResource,
     HookLabel,
     PromptBlockedException,
     SilmarilApiError,
@@ -157,6 +158,171 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
             }
         },
     }
+
+
+def test_classify_preserves_governance_response_evidence_and_legacy_shape():
+    benign = {"prediction": "BENIGN", "score": 0.0, "threshold": 0.5}
+    resource = {
+        "kind": "mcp_tool",
+        "id": "create_issue",
+        "parent_id": "github",
+    }
+    adapter = RecordingAdapter(
+        [
+            (
+                200,
+                {
+                    **benign,
+                    "governance": {
+                        "action": "block",
+                        "policy_version": "schema6",
+                        "rule_id": "deny-github",
+                        "resource": resource,
+                        "identity_revision": "catalog-9",
+                        "reason": "identity_unresolved",
+                    },
+                },
+            ),
+            (
+                200,
+                {
+                    **benign,
+                    "governance": {
+                        "action": "allow",
+                        "policy_version": "schema6",
+                        "resource": resource,
+                        "identity_revision": "catalog-10",
+                        "reason": "future_identity_reason",
+                    },
+                },
+            ),
+            (200, benign),
+        ]
+    )
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
+
+    with pytest.raises(FirewallBlockedException) as exc_info:
+        fw.classify("governed")
+
+    decision = exc_info.value.result.governance
+    assert decision is not None
+    assert decision.action == "block"
+    assert decision.policy_version == "schema6"
+    assert decision.rule_id == "deny-github"
+    assert decision.resource == GovernanceResource(
+        kind="mcp_tool",
+        id="create_issue",
+        parent_id="github",
+    )
+    assert decision.identity_revision == "catalog-9"
+    assert decision.reason == "identity_unresolved"
+
+    future = fw.classify("future reason")
+    assert future.governance is not None
+    assert future.governance.reason == "future_identity_reason"
+    assert fw.classify("legacy").governance is None
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {},
+        {"resource": None, "identity_revision": None, "reason": None},
+    ],
+    ids=["omitted", "explicit-null"],
+)
+def test_governance_response_accepts_absent_optional_evidence(evidence):
+    adapter = RecordingAdapter(
+        [
+            (
+                200,
+                {
+                    "prediction": "BENIGN",
+                    "score": 0.1,
+                    "threshold": 0.5,
+                    "governance": {
+                        "action": "allow",
+                        "policy_version": "legacy-policy",
+                        "rule_id": "legacy-rule",
+                        **evidence,
+                    },
+                },
+            )
+        ]
+    )
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
+
+    result = fw.classify("optional evidence")
+
+    assert result.governance is not None
+    assert result.governance.action == "allow"
+    assert result.governance.policy_version == "legacy-policy"
+    assert result.governance.rule_id == "legacy-rule"
+    assert result.governance.resource is None
+    assert result.governance.identity_revision is None
+    assert result.governance.reason is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("identity_revision", 1),
+        ("identity_revision", {}),
+        ("identity_revision", ""),
+        ("identity_revision", " \t"),
+        ("reason", 1),
+        ("reason", {}),
+        ("reason", ""),
+        ("reason", " \t"),
+    ],
+)
+def test_governance_response_rejects_malformed_string_evidence(field, value):
+    adapter = RecordingAdapter(
+        [
+            (
+                200,
+                {
+                    "prediction": "BENIGN",
+                    "score": 0.1,
+                    "threshold": 0.5,
+                    "governance": {
+                        "action": "allow",
+                        "policy_version": "schema6",
+                        field: value,
+                    },
+                },
+            )
+        ]
+    )
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"response governance {field} must be a non-empty string",
+    ):
+        fw.classify("malformed evidence")
+
+
+@pytest.mark.parametrize("kind", [None, 1, [], {}])
+def test_governance_response_rejects_non_string_resource_kind(kind):
+    adapter = RecordingAdapter([(200, {
+        "prediction": "BENIGN", "score": 0.1, "threshold": 0.5,
+        "governance": {
+            "action": "allow", "policy_version": "schema6",
+            "resource": {"kind": kind, "id": "search"},
+        },
+    })])
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
+    with pytest.raises(ValueError, match="resource kind must be a string"):
+        fw.classify("malformed resource")
 
 
 def test_shared_session_uses_client_headers_for_batch_and_retries(monkeypatch):

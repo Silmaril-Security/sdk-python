@@ -9,7 +9,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import requests
@@ -36,6 +36,7 @@ from silmaril_security.sdk.types import (
     GovernanceContext,
     GovernanceDecision,
     GovernanceResource,
+    GovernanceResourceKind,
 )
 
 LOG = logging.getLogger("silmaril_security.sdk")
@@ -134,7 +135,46 @@ def _governance_decision_from_json(value: Any) -> GovernanceDecision | None:
     rule_id = value.get("rule_id")
     if rule_id is not None and not isinstance(rule_id, str):
         raise ValueError("Firewall: response governance rule_id must be a string when provided")
-    return GovernanceDecision(action=action, policy_version=version, rule_id=rule_id)
+    resource_raw = value.get("resource")
+    identity_revision = value.get("identity_revision")
+    if identity_revision is not None and (
+        not isinstance(identity_revision, str) or not identity_revision.strip()
+    ):
+        raise ValueError(
+            "Firewall: response governance identity_revision must be a non-empty string"
+        )
+    reason = value.get("reason")
+    if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+        raise ValueError(
+            "Firewall: response governance reason must be a non-empty string when provided"
+        )
+    return GovernanceDecision(
+        action=action,
+        policy_version=version,
+        rule_id=rule_id,
+        resource=(
+            _governance_resource_from_json(resource_raw)
+            if resource_raw is not None
+            else None
+        ),
+        identity_revision=identity_revision,
+        reason=reason,
+    )
+
+
+def _governance_resource_from_json(value: Any) -> GovernanceResource:
+    if not isinstance(value, Mapping):
+        raise ValueError("Firewall: response governance resource must be an object")
+    kind = value.get("kind")
+    if not isinstance(kind, str):
+        raise ValueError("Firewall: response governance resource kind must be a string")
+    resource = GovernanceResource(
+        kind=cast(GovernanceResourceKind, kind),
+        id=value.get("id"),
+        parent_id=value.get("parent_id"),
+    )
+    _governance_resource_to_wire(resource)
+    return resource
 
 
 def _governance_resource_to_wire(resource: GovernanceResource) -> dict[str, str]:

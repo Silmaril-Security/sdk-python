@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Preserve optional schema 6 governance response evidence (`resource`,
+  `identity_revision`, and open-ended `reason`) on public decisions while
+  keeping legacy responses compatible.
+
 ## 0.7.3
 
 - Send typed governance resources in the runtime's top-level `resource` and
