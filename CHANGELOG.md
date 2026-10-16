@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.4
+
 - Preserve optional schema 6 governance response evidence (`resource`,
   `identity_revision`, and open-ended `reason`) on public decisions while
   keeping legacy responses compatible.
