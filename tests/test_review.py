@@ -643,3 +643,252 @@ def test_sync_batch_block_after_ack(monkeypatch):
     with pytest.raises(BatchFirewallBlockedException) as exc_info:
         fw.classify_batch(["attack"], review="standard")
     assert exc_info.value.results[0].review == "standard"
+
+
+def test_per_call_none_inherits_explicit_client_review(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, review="standard")
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append(kwargs)
+        return FakeResponse(200, _benign(review="standard"))
+
+    monkeypatch.setattr(fw._session, "post", fake_post)
+    result = fw.classify("hello", review=None)
+
+    assert json.loads(calls[0]["data"])["review"] == "standard"
+    assert result.review == "standard"
+    assert fw.review == "standard"
+
+
+@pytest.mark.asyncio
+async def test_async_per_call_none_inherits_explicit_client_review():
+    import httpx
+
+    payloads: list[dict[str, Any]] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        return httpx.Response(200, request=request, json=_benign(review=payload["review"]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            review="standard",
+        )
+        result = await fw.classify("hello", review=None)
+        await fw.aclose()
+
+    assert payloads[0]["review"] == "standard"
+    assert result.review == "standard"
+    assert fw.review == "standard"
+
+
+def _boundary_request() -> Any:
+    from types import SimpleNamespace
+
+    from langchain_core.messages import HumanMessage
+
+    messages = [HumanMessage(content="hello")]
+    return SimpleNamespace(
+        messages=messages,
+        state={"messages": []},
+        runtime=SimpleNamespace(config={"run_id": "run-1"}),
+        tool_call={"id": "call-1", "name": "search", "args": {"query": "safe"}},
+    )
+
+
+def _boundary_handler(surface: str, called: list[str]) -> Any:
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    if surface == "model":
+
+        def handle(_request: Any) -> Any:
+            called.append(surface)
+            return AIMessage(content="allowed")
+
+        return handle
+
+    def handle(_request: Any) -> Any:
+        called.append(surface)
+        return ToolMessage(content="allowed", tool_call_id="call-1")
+
+    return handle
+
+
+def _invoke_boundary(middleware: Any, surface: str, called: list[str]) -> Any:
+    request = _boundary_request()
+    handler = _boundary_handler(surface, called)
+    if surface == "model":
+        return middleware.wrap_model_call(request, handler)
+    return middleware.wrap_tool_call(request, handler)
+
+
+async def _ainvoke_boundary(middleware: Any, surface: str, called: list[str]) -> Any:
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    request = _boundary_request()
+
+    if surface == "model":
+
+        async def handle(_request: Any) -> Any:
+            called.append(surface)
+            return AIMessage(content="allowed")
+
+        return await middleware.awrap_model_call(request, handle)
+
+    async def handle(_request: Any) -> Any:
+        called.append(surface)
+        return ToolMessage(content="allowed", tool_call_id="call-1")
+
+    return await middleware.awrap_tool_call(request, handle)
+
+
+def _assert_boundary_payloads(payloads: list[dict[str, Any]], surface: str, *, acknowledge: bool) -> None:
+    expected_hooks = (
+        ["user_input", "llm_output"] if surface == "model" else ["tool_call", "tool_response"]
+    )
+    assert [payload["review"] for payload in payloads] == ["standard"] * (2 if acknowledge else 1)
+    assert [payload["hook"] for payload in payloads] == expected_hooks[: len(payloads)]
+
+
+@pytest.mark.parametrize("surface", ["model", "tool"])
+@pytest.mark.parametrize("acknowledge", [True, False])
+def test_sync_deepagents_boundaries_inherit_review(surface: str, acknowledge: bool):
+    pytest.importorskip("deepagents")
+    from silmaril_security.sdk.deepagents import create_deepagents_middleware
+
+    responses = [(200, _benign(review="standard") if acknowledge else _benign())] * (
+        2 if acknowledge else 1
+    )
+    adapter = RecordingAdapter(responses)
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    firewall_events: list[Any] = []
+    adapter_events: list[Any] = []
+    called: list[str] = []
+    fw = Firewall(
+        api_key="sk",
+        api_url=TEST_API_URL,
+        session=session,
+        review="standard",
+        on_classify=firewall_events.append,
+    )
+    middleware = create_deepagents_middleware(
+        fw,
+        fail_open=True,
+        on_classify=adapter_events.append,
+    )
+
+    if acknowledge:
+        _invoke_boundary(middleware, surface, called)
+        assert called == [surface]
+        assert firewall_events
+        assert adapter_events
+    else:
+        with pytest.raises(ReviewCompatibilityError):
+            _invoke_boundary(middleware, surface, called)
+        assert called == []
+        assert firewall_events == []
+        assert adapter_events == []
+
+    payloads = [json.loads(request.body) for request in adapter.requests]
+    _assert_boundary_payloads(payloads, surface, acknowledge=acknowledge)
+    assert fw.review == "standard"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["model", "tool"])
+@pytest.mark.parametrize("acknowledge", [True, False])
+async def test_async_deepagents_boundaries_inherit_review(surface: str, acknowledge: bool):
+    pytest.importorskip("deepagents")
+    import httpx
+
+    from silmaril_security.sdk.deepagents import create_deepagents_middleware
+
+    payloads: list[dict[str, Any]] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        body = _benign(review=payload["review"]) if acknowledge else _benign()
+        return httpx.Response(200, request=request, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        firewall_events: list[Any] = []
+        adapter_events: list[Any] = []
+        called: list[str] = []
+        fw = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            review="standard",
+            on_classify=firewall_events.append,
+        )
+        middleware = create_deepagents_middleware(
+            fw,
+            fail_open=True,
+            on_classify=adapter_events.append,
+        )
+        if acknowledge:
+            await _ainvoke_boundary(middleware, surface, called)
+            assert called == [surface]
+            assert firewall_events
+            assert adapter_events
+        else:
+            with pytest.raises(ReviewCompatibilityError):
+                await _ainvoke_boundary(middleware, surface, called)
+            assert called == []
+            assert firewall_events == []
+            assert adapter_events == []
+        await fw.aclose()
+
+    _assert_boundary_payloads(payloads, surface, acknowledge=acknowledge)
+    assert fw.review == "standard"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledge", [True, False])
+async def test_async_langchain_bridge_inherits_client_review(monkeypatch, acknowledge: bool):
+    pytest.importorskip("langchain_core.callbacks")
+    from silmaril_security.sdk.async_firewall import AsyncFirewall as AsyncClient
+
+    recorded: list[dict[str, Any]] = []
+
+    async def post_json(self: AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
+        recorded.append(payload)
+        body = _benign()
+        if acknowledge:
+            body["review"] = payload["review"]
+        return body
+
+    monkeypatch.setattr(AsyncClient, "_post_json", post_json)
+    firewall_events: list[Any] = []
+    callback_events: list[Any] = []
+    fw = Firewall(
+        api_key="sk",
+        api_url=TEST_API_URL,
+        review="standard",
+        on_classify=firewall_events.append,
+    )
+    handler = fw.as_async_langchain_handler(fail_open=True, on_classify=callback_events.append)
+    call = handler.on_chat_model_start(
+        serialized={},
+        messages=[[{"role": "user", "content": "hello"}]],
+        run_id=uuid4(),
+    )
+    if acknowledge:
+        await call
+        assert callback_events
+    else:
+        with pytest.raises(ReviewCompatibilityError):
+            await call
+        assert callback_events == []
+    assert firewall_events == []
+    assert recorded[0]["review"] == "standard"
+    assert recorded[0]["hook"] == "user_input"
+    assert len(recorded) == 1
+    assert fw.review == "standard"

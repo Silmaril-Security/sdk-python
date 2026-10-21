@@ -221,8 +221,11 @@ calls retain their pre-0.6 Block enforcement fallback internally. Set
 exception. A malicious prediction, or a governance action of `"block"`, raises
 a typed blocking exception only when the locally effective mode is `"block"`.
 Per-call `governance`, `review`, and `request_id` are described under
-Governance, Review, and Request Metadata. `None` for `review` means the field
-is omitted from the request; it does not send JSON `null`.
+Governance, Review, and Request Metadata. `None` for `review` means that layer
+makes no selection. A per-call `review=None` inherits an explicit client
+setting and still sends it. The wire field is omitted only when neither the
+client nor the call has an explicit selection. `None` does not send JSON
+`null`.
 
 When a custom `requests.Session` is provided, the SDK sends its `x-api-key`
 and `content-type` headers on each Firewall request without modifying the
@@ -381,9 +384,12 @@ is unchanged.
 The only valid values are the exact strings `"standard"` and `"deep"`.
 `"standard"` disables that stage for the request. `"deep"` requests the
 existing second opinion on eligible Qwen threat candidates and does not force
-large-model execution on every event. Python `None` omits the wire field so
-the selected tenant/surface AppConfig `threat_judge.enabled` remains
-authoritative. When a judge stays configured, `enabled: false` is the
+large-model execution on every event. `None` means that layer makes no
+selection. A per-call `review=None` inherits an explicit client setting and
+still sends it. The SDK omits the wire field only when neither the client nor
+the call has an explicit selection, so the selected tenant/surface AppConfig
+`threat_judge.enabled` remains authoritative. When a judge stays configured,
+`enabled: false` is the
 overridable server default, and an authenticated client may still request
 `"deep"`. Removing the judge configuration prevents deep requests. The SDK
 never fills an implicit review default. Invalid values, including other
@@ -397,10 +403,12 @@ runtime, an inactive Cascade, or a surface without a configured judge returns
 HTTP 400 before inference. Standard review is valid without a judge. `review`
 is independent of `mode`.
 
-Omitted review keeps the legacy request and response shape. An explicit
-client default is inherited by `classify()`, `classify_batch()`, and existing
-LangChain and Deep Agents adapters. A per-call `review` overrides that
-default for one request without mutating the client. Successful explicit
+The wire field is omitted only when the client and the call both have no
+explicit selection, and that omission keeps the legacy request and response
+shape. An explicit client `review` is inherited by `classify()`,
+`classify_batch()`, and existing LangChain and Deep Agents adapters, including
+when a call passes `review=None`. A per-call `"standard"` or `"deep"` overrides
+that default for one request without mutating the client. Successful explicit
 selection returns the same exact string on the response (`BlockResult.review`
 for a single result, and the batch envelope copied onto each `BlockResult`).
 That field reports the applied setting, not whether the judge ran.
@@ -417,13 +425,14 @@ Application code:
 ```python
 from silmaril_security.sdk import Firewall, ReviewCompatibilityError
 
-# Omit review: AppConfig remains authoritative.
+# Neither layer selects review, so the wire field is omitted.
 fw = Firewall(api_key=api_key, api_url=api_url)
 fw.classify(text)
 
-# Disable the optional large-judge stage for this client.
+# Client selection is sent. Per-call None inherits it.
 standard = Firewall(api_key=api_key, api_url=api_url, review="standard")
 standard.classify(text)
+standard.classify(text, review=None)
 standard.classify_batch([text])
 
 # Enable the server-owned judge config for one call.

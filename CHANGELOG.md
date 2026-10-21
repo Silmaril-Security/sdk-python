@@ -3,10 +3,12 @@
 ## Unreleased
 
 - Add optional `review` (`"standard"` or `"deep"`) on sync and async Firewall
-  clients and on single/batch `classify` calls. Python `None` omits the wire
-  field so tenant AppConfig remains authoritative; per-call selection overrides
-  an explicit client default without mutating it. Existing adapters inherit the
-  client setting.
+  clients and on single/batch `classify` calls. `None` means that layer makes
+  no selection. A per-call `None` inherits an explicit client setting. The wire
+  field is omitted only when neither layer has an explicit selection, so tenant
+  AppConfig remains authoritative. An explicit per-call value overrides the
+  client default without mutating it. Existing adapters inherit the client
+  setting.
 - Validate top-level review acknowledgement for every explicit selection and
   raise non-retryable `ReviewCompatibilityError` on a missing or mismatched
   value before callbacks or enforcement.
