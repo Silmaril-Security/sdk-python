@@ -18,6 +18,7 @@ from silmaril_security.sdk._version import VERSION
 from silmaril_security.sdk.exceptions import (
     BatchFirewallBlockedException,
     FirewallBlockedException,
+    ReviewCompatibilityError,
     SilmarilApiError,
 )
 from silmaril_security.sdk.hooks import HookLabel, hook_value, normalize_hook_label
@@ -37,6 +38,7 @@ from silmaril_security.sdk.types import (
     GovernanceDecision,
     GovernanceResource,
     GovernanceResourceKind,
+    ReviewLevel,
 )
 
 LOG = logging.getLogger("silmaril_security.sdk")
@@ -47,6 +49,7 @@ _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _MAX_BACKOFF_SECONDS = 30.0
 _MAX_ERROR_BODY_BYTES = 1 << 16
 _LEGACY_RESPONSE_MODE: FirewallMode = "block"
+_MISSING = object()
 
 
 def _validate_mode(value: Any) -> FirewallMode:
@@ -85,9 +88,42 @@ def _effective_mode(
     return default_mode
 
 
+def _validate_review(value: Any) -> ReviewLevel:
+    if value in ("standard", "deep"):
+        return value
+    raise ValueError("Firewall: review must be standard or deep")
+
+
+def _effective_review(
+    default_review: ReviewLevel | None,
+    review: ReviewLevel | None,
+) -> ReviewLevel | None:
+    if review is not None:
+        return _validate_review(review)
+    return default_review
+
+
+def _require_review_acknowledgement(
+    data: Mapping[str, Any],
+    requested: ReviewLevel | None,
+) -> ReviewLevel | None:
+    if requested is None:
+        return None
+    if not isinstance(data, Mapping):
+        raise ReviewCompatibilityError(requested=requested, acknowledged=None)
+    acknowledged = data.get("review", _MISSING)
+    if acknowledged != requested:
+        raise ReviewCompatibilityError(
+            requested=requested,
+            acknowledged=None if acknowledged is _MISSING else acknowledged,
+        )
+    return requested
+
+
 def _block_result_from_json(
     data: dict[str, Any],
     requested_mode: FirewallMode | None = None,
+    review: ReviewLevel | None = None,
 ) -> BlockResult:
     score = float(data["score"])
     threshold = float(data["threshold"])
@@ -118,6 +154,7 @@ def _block_result_from_json(
         detector_counts=normalize_harmful_outcome_int_map(
             data.get("detector_counts"), "detector_counts"
         ),
+        review=review,
     )
 
 
@@ -291,10 +328,13 @@ def _single_payload(
     governance: GovernanceContext | None,
     request_id: str,
     mode: FirewallMode | None,
+    review: ReviewLevel | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"text": sanitize_text(text)}
     if mode is not None:
         payload["mode"] = mode
+    if review is not None:
+        payload["review"] = review
     hook_str = hook_value(hook)
     if hook_str:
         payload["hook"] = hook_str
@@ -315,6 +355,7 @@ def _batch_payload(
     governance: Sequence[GovernanceContext | None] | None,
     request_id: str,
     mode: FirewallMode | None,
+    review: ReviewLevel | None,
 ) -> tuple[list[str], dict[str, Any]]:
     text_list = [sanitize_text(text) for text in texts]
     if not text_list:
@@ -342,6 +383,8 @@ def _batch_payload(
     payload: dict[str, Any] = {"texts": text_list}
     if mode is not None:
         payload["mode"] = mode
+    if review is not None:
+        payload["review"] = review
     if hooks:
         payload["hooks"] = [hook_value(h) for h in hooks]
     if tool_names:
@@ -369,6 +412,7 @@ def _batch_results(
     *,
     expected_length: int,
     mode: FirewallMode | None,
+    review: ReviewLevel | None = None,
 ) -> list[BlockResult]:
     predictions = data["predictions"]
     if len(predictions) != expected_length:
@@ -376,7 +420,7 @@ def _batch_results(
             "Firewall: predictions length "
             f"{len(predictions)} does not match texts length {expected_length}"
         )
-    return [_block_result_from_json(item, mode) for item in predictions]
+    return [_block_result_from_json(item, mode, review=review) for item in predictions]
 
 
 def _new_classify_event(
@@ -411,6 +455,7 @@ class Firewall:
         timeout: float = DEFAULT_TIMEOUT,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        review: ReviewLevel | None = None,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         session: requests.Session | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
@@ -428,6 +473,7 @@ class Firewall:
         self.timeout = timeout
         self.mode = _validate_mode(mode) if mode is not None else _legacy_mode(shadow_mode)
         self.shadow_mode = self.mode == "shadow"
+        self.review = _validate_review(review) if review is not None else None
         self.on_classify = on_classify
         self.max_retries = max_retries
         self._session = session or requests.Session()
@@ -442,11 +488,13 @@ class Firewall:
         governance: GovernanceContext | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        review: ReviewLevel | None = None,
         request_id: str | None = None,
     ) -> BlockResult:
         """Classify a single text and enforce the backend tenant threshold."""
         request_id_value = request_id or str(uuid4())
         requested_mode = self._effective_mode(mode, shadow_mode)
+        requested_review = self._effective_review(review)
         result = self._classify_raw(
             text,
             hook=hook,
@@ -455,6 +503,7 @@ class Firewall:
             governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
+            review=requested_review,
         )
         event = self._new_classify_event(
             text=text,
@@ -484,11 +533,13 @@ class Firewall:
         governance: Sequence[GovernanceContext | None] | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        review: ReviewLevel | None = None,
         request_id: str | None = None,
     ) -> list[BlockResult]:
         """Classify multiple independent texts and enforce backend tenant thresholds."""
         request_id_value = request_id or str(uuid4())
         requested_mode = self._effective_mode(mode, shadow_mode)
+        requested_review = self._effective_review(review)
         results = self._classify_batch_raw(
             texts,
             hooks=hooks,
@@ -497,6 +548,7 @@ class Firewall:
             governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
+            review=requested_review,
         )
         blocked: list[BlockedBatchItem] = []
         for index, result in enumerate(results):
@@ -545,7 +597,9 @@ class Firewall:
         governance: GovernanceContext | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        review: ReviewLevel | None = None,
     ) -> BlockResult:
+        requested_review = self._effective_review(review)
         payload = _single_payload(
             text,
             hook=hook,
@@ -554,8 +608,11 @@ class Firewall:
             governance=governance,
             request_id=request_id,
             mode=mode,
+            review=requested_review,
         )
-        return _block_result_from_json(self._post_json(payload), mode)
+        data = self._post_json(payload)
+        _require_review_acknowledgement(data, requested_review)
+        return _block_result_from_json(data, mode, review=requested_review)
 
     def _classify_single_raw(
         self,
@@ -589,7 +646,9 @@ class Firewall:
         governance: Sequence[GovernanceContext | None] | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        review: ReviewLevel | None = None,
     ) -> list[BlockResult]:
+        requested_review = self._effective_review(review)
         text_list, payload = _batch_payload(
             texts,
             hooks=hooks,
@@ -598,9 +657,16 @@ class Firewall:
             governance=governance,
             request_id=request_id,
             mode=mode,
+            review=requested_review,
         )
         data = self._post_json(payload)
-        return _batch_results(data, expected_length=len(text_list), mode=mode)
+        _require_review_acknowledgement(data, requested_review)
+        return _batch_results(
+            data,
+            expected_length=len(text_list),
+            mode=mode,
+            review=requested_review,
+        )
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)
@@ -651,6 +717,9 @@ class Firewall:
         shadow_mode: bool | None,
     ) -> FirewallMode | None:
         return _effective_mode(self.mode, mode, shadow_mode)
+
+    def _effective_review(self, review: ReviewLevel | None) -> ReviewLevel | None:
+        return _effective_review(self.review, review)
 
     def _new_classify_event(
         self,

@@ -9,6 +9,7 @@ from uuid import uuid4
 from weakref import WeakValueDictionary, ref
 
 from silmaril_security.sdk.async_firewall import AsyncFirewall
+from silmaril_security.sdk.exceptions import ReviewCompatibilityError
 from silmaril_security.sdk.firewall import Firewall
 from silmaril_security.sdk.hooks import HookLabel
 from silmaril_security.sdk.types import ClassifyEvent, FirewallMode
@@ -114,6 +115,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
                 text, hook=hook, tool_name=tool_name, metadata=self._metadata(request),
                 governance=None, request_id=str(uuid4()), mode=self.mode,
             )
+        except ReviewCompatibilityError:
+            raise
         except Exception:
             if not self.fail_open:
                 raise
@@ -134,6 +137,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
                 text, hook=hook, tool_name=tool_name, metadata=self._metadata(request),
                 governance=None, request_id=str(uuid4()), mode=self.mode,
             )
+        except ReviewCompatibilityError:
+            raise
         except Exception:
             if not self.fail_open:
                 raise

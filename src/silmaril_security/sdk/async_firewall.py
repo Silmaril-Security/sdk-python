@@ -26,10 +26,13 @@ from silmaril_security.sdk.firewall import (
     _batch_results,
     _block_result_from_json,
     _effective_mode,
+    _effective_review,
     _new_classify_event,
+    _require_review_acknowledgement,
     _retry_after_seconds,
     _single_payload,
     _validate_mode,
+    _validate_review,
 )
 from silmaril_security.sdk.hooks import HookLabel
 from silmaril_security.sdk.types import (
@@ -39,6 +42,7 @@ from silmaril_security.sdk.types import (
     ClassifyEvent,
     FirewallMode,
     GovernanceContext,
+    ReviewLevel,
 )
 
 if TYPE_CHECKING:
@@ -84,6 +88,7 @@ class AsyncFirewall:
         timeout: float = DEFAULT_TIMEOUT,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        review: ReviewLevel | None = None,
         on_classify: Callable[[ClassifyEvent], None | Awaitable[None]] | None = None,
         http_client: httpx.AsyncClient | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
@@ -114,6 +119,7 @@ class AsyncFirewall:
             else ("shadow" if shadow_mode else "block" if shadow_mode is False else None)
         )
         self.shadow_mode = self.mode == "shadow"
+        self.review = _validate_review(review) if review is not None else None
         self.on_classify = on_classify
         self.max_retries = max_retries
         self._httpx = httpx
@@ -206,11 +212,13 @@ class AsyncFirewall:
         governance: GovernanceContext | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        review: ReviewLevel | None = None,
         request_id: str | None = None,
     ) -> BlockResult:
         """Classify one text without blocking the event loop."""
         request_id_value = request_id or str(uuid4())
         requested_mode = self._effective_mode(mode, shadow_mode)
+        requested_review = self._effective_review(review)
         result = await self._classify_raw(
             text,
             hook=hook,
@@ -219,6 +227,7 @@ class AsyncFirewall:
             governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
+            review=requested_review,
         )
         event = _new_classify_event(text=text, hook=hook, tool_name=tool_name, result=result)
         await self._fire_on_classify(event)
@@ -243,11 +252,13 @@ class AsyncFirewall:
         governance: Sequence[GovernanceContext | None] | None = None,
         mode: FirewallMode | None = None,
         shadow_mode: bool | None = None,
+        review: ReviewLevel | None = None,
         request_id: str | None = None,
     ) -> list[BlockResult]:
         """Classify independent texts in one async request."""
         request_id_value = request_id or str(uuid4())
         requested_mode = self._effective_mode(mode, shadow_mode)
+        requested_review = self._effective_review(review)
         # Results must describe the request that was sent, so the inputs are
         # snapshotted before the caller can mutate them during the await.
         sent_texts = list(texts)
@@ -261,6 +272,7 @@ class AsyncFirewall:
             governance=governance,
             request_id=request_id_value,
             mode=requested_mode,
+            review=requested_review,
         )
         blocked: list[BlockedBatchItem] = []
         for index, result in enumerate(results):
@@ -303,7 +315,9 @@ class AsyncFirewall:
         governance: GovernanceContext | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        review: ReviewLevel | None = None,
     ) -> BlockResult:
+        requested_review = self._effective_review(review)
         payload = _single_payload(
             text,
             hook=hook,
@@ -312,8 +326,11 @@ class AsyncFirewall:
             governance=governance,
             request_id=request_id,
             mode=mode,
+            review=requested_review,
         )
-        return _block_result_from_json(await self._post_json(payload), mode)
+        data = await self._post_json(payload)
+        _require_review_acknowledgement(data, requested_review)
+        return _block_result_from_json(data, mode, review=requested_review)
 
     async def _classify_batch_raw(
         self,
@@ -325,7 +342,9 @@ class AsyncFirewall:
         governance: Sequence[GovernanceContext | None] | None = None,
         request_id: str,
         mode: FirewallMode | None = None,
+        review: ReviewLevel | None = None,
     ) -> list[BlockResult]:
+        requested_review = self._effective_review(review)
         text_list, payload = _batch_payload(
             texts,
             hooks=hooks,
@@ -334,9 +353,16 @@ class AsyncFirewall:
             governance=governance,
             request_id=request_id,
             mode=mode,
+            review=requested_review,
         )
         data = await self._post_json(payload)
-        return _batch_results(data, expected_length=len(text_list), mode=mode)
+        _require_review_acknowledgement(data, requested_review)
+        return _batch_results(
+            data,
+            expected_length=len(text_list),
+            mode=mode,
+            review=requested_review,
+        )
 
     async def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         client = self._ensure_client()
@@ -447,6 +473,9 @@ class AsyncFirewall:
         shadow_mode: bool | None,
     ) -> FirewallMode | None:
         return _effective_mode(self.mode, mode, shadow_mode)
+
+    def _effective_review(self, review: ReviewLevel | None) -> ReviewLevel | None:
+        return _effective_review(self.review, review)
 
     async def _fire_on_classify(self, event: ClassifyEvent) -> None:
         if self.on_classify is None:
