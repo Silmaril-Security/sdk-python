@@ -18,7 +18,7 @@ from silmaril_security.sdk._utils import (
     extract_text_from_tool_input,
 )
 from silmaril_security.sdk.async_firewall import AsyncFirewall
-from silmaril_security.sdk.exceptions import FirewallBlockedException
+from silmaril_security.sdk.exceptions import FirewallBlockedException, ReviewCompatibilityError
 from silmaril_security.sdk.firewall import Firewall
 from silmaril_security.sdk.hooks import (
     FIREWALL_HOOK_TO_LABEL,
@@ -107,6 +107,8 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
                 request_id=str(uuid4()),
                 mode=self.mode,
             )
+        except ReviewCompatibilityError:
+            raise
         except Exception:
             if not self.fail_open:
                 raise
@@ -311,6 +313,8 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
                 request_id=str(uuid4()),
                 mode=self._sync_handler.mode,
             )
+        except ReviewCompatibilityError:
+            raise
         except Exception:
             if not self._sync_handler.fail_open:
                 raise
@@ -468,6 +472,7 @@ async def _async_classify_raw(
         api_url=firewall.api_url,
         timeout=firewall.timeout,
         mode=firewall.mode,
+        review=firewall.review,
         max_retries=firewall.max_retries,
     ) as async_firewall:
         return await async_firewall._classify_raw(

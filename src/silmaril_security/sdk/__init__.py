@@ -12,6 +12,7 @@ from silmaril_security.sdk.exceptions import (
     BatchPromptBlockedException,
     FirewallBlockedException,
     PromptBlockedException,
+    ReviewCompatibilityError,
     SilmarilApiError,
 )
 from silmaril_security.sdk.firewall import (
@@ -71,6 +72,7 @@ from silmaril_security.sdk.types import (
     GovernanceResource,
     GovernanceResourceKind,
     Prediction,
+    ReviewLevel,
 )
 
 __version__ = VERSION
@@ -122,6 +124,8 @@ __all__ = [
     "PrimaryOutcome",
     "PrimaryOutcomeValue",
     "PromptBlockedException",
+    "ReviewCompatibilityError",
+    "ReviewLevel",
     "SilmarilApiError",
     "SilmarilFirewall",
     "is_harmful_outcome",

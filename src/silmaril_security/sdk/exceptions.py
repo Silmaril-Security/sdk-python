@@ -10,7 +10,7 @@ from uuid import UUID
 from typing_extensions import deprecated
 
 from silmaril_security.sdk.hooks import HookLabel
-from silmaril_security.sdk.types import BlockedBatchItem, BlockResult
+from silmaril_security.sdk.types import BlockedBatchItem, BlockResult, ReviewLevel
 
 _MAX_PROMPT_DISPLAY_LEN = 100
 
@@ -26,6 +26,21 @@ class SilmarilApiError(Exception):
 
 
 APIError = SilmarilApiError
+
+
+class ReviewCompatibilityError(Exception):
+    """Raised when an explicit review selection is not acknowledged by the backend."""
+
+    def __init__(self, *, requested: ReviewLevel, acknowledged: object) -> None:
+        self.requested = requested
+        self.acknowledged = acknowledged
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        return (
+            "Firewall: backend did not acknowledge requested review "
+            f"{self.requested!r} (got {self.acknowledged!r})"
+        )
 
 
 class FirewallBlockedException(Exception):

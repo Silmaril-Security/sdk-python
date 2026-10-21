@@ -13,6 +13,7 @@ from silmaril_security.sdk.outcomes import HarmfulOutcomeValue, PrimaryOutcomeVa
 
 Prediction = Literal["BENIGN", "MALICIOUS"]
 FirewallMode = Literal["shadow", "warn", "block"]
+ReviewLevel = Literal["standard", "deep"]
 ClassificationMetadata = Mapping[str, Any]
 GovernanceAction = Literal["allow", "block"]
 GovernanceResourceKind = Literal[
@@ -57,6 +58,8 @@ class BlockResult:
     # None when the response omits mode and no explicit override was requested.
     mode: FirewallMode | None = None
     governance: GovernanceDecision | None = None
+    # Applied review setting acknowledged for an explicit selection; never judge execution.
+    review: ReviewLevel | None = None
 
 
 @dataclass(frozen=True, init=False)
