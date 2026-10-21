@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.5
 
 - Add optional `review` (`"standard"` or `"deep"`) on sync and async Firewall
   clients and on single/batch `classify` calls. `None` means that layer makes
