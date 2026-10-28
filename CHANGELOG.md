@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.6
+
+- Reject negative `detector_counts` before returning results or invoking
+  callbacks across sync and async single and batch classification, while
+  preserving zero and positive counts and future detector labels.
+
 ## 0.7.5
 
 - Add optional `review` (`"standard"` or `"deep"`) on sync and async Firewall
