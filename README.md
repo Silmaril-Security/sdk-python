@@ -739,6 +739,6 @@ IDs must be non-empty; MCP tools also require their canonical server parent ID.
 The compatibility metadata copy remains attribution only. Caller agent metadata
 does not supply an authenticated principal.
 
-This source prepares version 0.7.5. Its registry install command becomes
+This source prepares version 0.7.6. Its registry install command becomes
 available after the authorized main-branch release workflow publishes the package.
 Confirm registry publication before installing this version.
