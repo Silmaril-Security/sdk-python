@@ -206,5 +206,10 @@ def normalize_harmful_outcome_int_map(
             raise ValueError(
                 f"Firewall: invalid {field_name} value for {key!r}: {raw!r} (expected int)"
             )
+        if raw < 0:
+            raise ValueError(
+                f"Firewall: invalid {field_name} value for {key!r}: {raw!r} "
+                "(expected nonnegative int)"
+            )
         result[outcome_key] = raw
     return result

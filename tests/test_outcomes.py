@@ -52,8 +52,10 @@ def test_outcome_validation_helpers():
         {OUTCOME_SECRET_EXPOSURE: 0.8, "future_harmful": 0.2}, "outcome_scores"
     ) == {OUTCOME_SECRET_EXPOSURE: 0.8, "future_harmful": 0.2}
     assert normalize_harmful_outcome_int_map(
-        {OUTCOME_SECRET_EXPOSURE: 2, "future_harmful": 1}, "detector_counts"
-    ) == {OUTCOME_SECRET_EXPOSURE: 2, "future_harmful": 1}
+        {OUTCOME_SECRET_EXPOSURE: 2, "future_harmful": 0}, "detector_counts"
+    ) == {OUTCOME_SECRET_EXPOSURE: 2, "future_harmful": 0}
+    assert normalize_harmful_outcome_int_map(None, "detector_counts") is None
+    assert normalize_harmful_outcome_int_map({}, "detector_counts") == {}
 
 
 @pytest.mark.parametrize("value", [None, 1, "", " ", "\t\n"])
@@ -87,3 +89,9 @@ def test_harmful_outcomes_reject_benign_and_malformed_maps():
         )
     with pytest.raises(ValueError, match="invalid detector_counts value"):
         normalize_harmful_outcome_int_map({OUTCOME_SECRET_EXPOSURE: 2.9}, "detector_counts")
+
+
+@pytest.mark.parametrize("outcome", [OUTCOME_SECRET_EXPOSURE, "future_harmful"])
+def test_harmful_outcome_count_map_rejects_negative_counts(outcome):
+    with pytest.raises(ValueError, match="expected nonnegative int"):
+        normalize_harmful_outcome_int_map({outcome: -1}, "detector_counts")

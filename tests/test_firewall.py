@@ -939,6 +939,60 @@ def test_batch_preserves_and_enforces_future_outcomes(monkeypatch):
     assert exc_info.value.blocked[0].result.primary_outcome == future
 
 
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+def test_sync_decoding_accepts_nonnegative_detector_counts(batch):
+    detector_counts = {OUTCOME_SECRET_EXPOSURE: 0, "future_policy_violation": 2}
+    result_body = {
+        "prediction": "BENIGN",
+        "score": 0.1,
+        "threshold": 0.5,
+        "detector_counts": detector_counts,
+    }
+    body = {"predictions": [result_body]} if batch else result_body
+    adapter = RecordingAdapter([(200, body)])
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
+
+    result = fw.classify_batch(["safe"])[0] if batch else fw.classify("safe")
+
+    assert result.detector_counts == detector_counts
+
+
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+@pytest.mark.parametrize(
+    "outcome",
+    [OUTCOME_SECRET_EXPOSURE, "future_policy_violation"],
+    ids=["known", "future"],
+)
+def test_sync_decoding_rejects_negative_detector_counts_before_callbacks(batch, outcome):
+    result_body = {
+        "prediction": "BENIGN",
+        "score": 0.1,
+        "threshold": 0.5,
+        "detector_counts": {outcome: -1},
+    }
+    body = {"predictions": [result_body]} if batch else result_body
+    adapter = RecordingAdapter([(200, body)])
+    session = requests.Session()
+    session.mount("https://api.test.invalid/", adapter)
+    events: list[ClassifyEvent] = []
+    fw = Firewall(
+        api_key="sk",
+        api_url=TEST_API_URL,
+        session=session,
+        on_classify=events.append,
+    )
+
+    with pytest.raises(ValueError, match="expected nonnegative int"):
+        if batch:
+            fw.classify_batch(["malformed"])
+        else:
+            fw.classify("malformed")
+
+    assert events == []
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

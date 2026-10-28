@@ -452,6 +452,69 @@ async def test_async_batch_preserves_and_enforces_future_outcomes():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+async def test_async_decoding_accepts_nonnegative_detector_counts(batch):
+    detector_counts = {"secret_exposure": 0, "future_policy_violation": 2}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        result_body = {
+            "prediction": "BENIGN",
+            "score": 0.1,
+            "threshold": 0.5,
+            "detector_counts": detector_counts,
+        }
+        body = {"predictions": [result_body]} if batch else result_body
+        return httpx.Response(200, request=request, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
+        result = (
+            (await fw.classify_batch(["safe"]))[0]
+            if batch
+            else await fw.classify("safe")
+        )
+
+    assert result.detector_counts == detector_counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["secret_exposure", "future_policy_violation"],
+    ids=["known", "future"],
+)
+async def test_async_decoding_rejects_negative_detector_counts_before_callbacks(
+    batch, outcome
+):
+    def handle(request: httpx.Request) -> httpx.Response:
+        result_body = {
+            "prediction": "BENIGN",
+            "score": 0.1,
+            "threshold": 0.5,
+            "detector_counts": {outcome: -1},
+        }
+        body = {"predictions": [result_body]} if batch else result_body
+        return httpx.Response(200, request=request, json=body)
+
+    events: list[ClassifyEvent] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(
+            api_key="sk",
+            api_url=TEST_API_URL,
+            http_client=client,
+            on_classify=events.append,
+        )
+        with pytest.raises(ValueError, match="expected nonnegative int"):
+            if batch:
+                await fw.classify_batch(["malformed"])
+            else:
+                await fw.classify("malformed")
+
+    assert events == []
+
+
+@pytest.mark.asyncio
 async def test_async_batch_rejects_malformed_outcome_map():
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
