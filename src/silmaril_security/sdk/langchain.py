@@ -43,6 +43,7 @@ from silmaril_security.sdk.types import (
 try:
     from langchain_core.callbacks import AsyncCallbackHandler, BaseCallbackHandler
     from langchain_core.runnables import Runnable, RunnableBinding, RunnableConfig
+    from langchain_core.runnables.base import RunnableBindingBase
 except ImportError as exc:  # pragma: no cover - exercised by packaging consumers
     raise ImportError(
         "LangChain support requires the langchain extra: "
@@ -543,7 +544,7 @@ async def _async_classify_raw(
 
 def protect_langchain_runnable(
     firewall: Firewall | AsyncFirewall, runnable: Runnable[_Input, _Output], **handler_options: Any,
-) -> RunnableBinding[_Input, _Output]:
+) -> Runnable[_Input, _Output]:
     """Protect a runnable using its native config at every invocation boundary.
 
     The standard binding retains normal invoke/ainvoke, batch and streaming
@@ -553,6 +554,14 @@ def protect_langchain_runnable(
     from langchain_core.runnables.config import ensure_config, merge_configs
 
     reject_conversation_options(handler_options)
+    if isinstance(runnable, RunnableBindingBase):
+        # Keep existing bindings outside protection. Their saved defaults and
+        # dynamic config factories then run exactly once before we snapshot
+        # native identity at the actual model/tool invocation boundary.
+        protected = protect_langchain_runnable(firewall, runnable.bound, **handler_options)
+        copy = getattr(runnable, "model_copy", None) or runnable.copy
+        return copy(update={"bound": protected})
+
     # Validate options eagerly; each actual invocation gets an independent
     # handler so no thread identity is stored on the reusable binding.
     handler_type = AsyncSilmarilFirewallHandler if isinstance(firewall, AsyncFirewall) else SilmarilFirewallHandler

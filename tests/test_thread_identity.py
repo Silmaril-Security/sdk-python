@@ -628,3 +628,84 @@ def test_protected_binding_retry_keeps_native_boundary_on_each_attempt(monkeypat
     protected.invoke("safe", config={"configurable": {"thread_id": "retry"}})
     assert model.attempts == 2
     assert seen and all(kwargs["metadata"]["conversationId"] == "retry" for _, kwargs in seen)
+
+
+@pytest.mark.parametrize("method", ["invoke", "batch", "stream"])
+def test_protection_uses_saved_runnable_native_config_before_invocation_overrides(monkeypatch, method):
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    fw, seen = firewall(monkeypatch)
+    saved = EchoModel().with_config(configurable={"thread_id": "saved-thread"})
+    protected = protect_langchain_runnable(fw, saved, hooks=ALL_HOOKS)
+    for config, expected in [(None, "saved-thread"), ({"configurable": {"thread_id": "override"}}, "override")]:
+        seen.clear()
+        if method == "batch":
+            protected.batch(["safe"], config=config)
+        elif method == "stream":
+            assert list(protected.stream("safe", config=config))
+        else:
+            protected.invoke("safe", config=config)
+        assert seen and all(kwargs["metadata"]["conversationId"] == expected for _, kwargs in seen)
+
+
+@pytest.mark.asyncio
+async def test_protection_uses_saved_native_config_for_async_model(monkeypatch):
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    fw, seen = firewall(monkeypatch, asynchronous=True)
+    protected = protect_langchain_runnable(fw, EchoModel().with_config(configurable={"thread_id": "saved-thread"}))
+    await protected.ainvoke("safe")
+    assert seen and all(kwargs["metadata"]["conversationId"] == "saved-thread" for _, kwargs in seen)
+    seen.clear()
+    await protected.ainvoke("safe", config={"configurable": {"thread_id": "override"}})
+    assert seen and all(kwargs["metadata"]["conversationId"] == "override" for _, kwargs in seen)
+    await fw.aclose()
+
+
+def test_saved_native_model_defaults_override_ambient_parent_without_duplicating_callbacks(monkeypatch):
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    fw, seen = firewall(monkeypatch)
+    starts = []
+
+    class Observer(BaseCallbackHandler):
+        def on_chat_model_start(self, *args, **kwargs):
+            starts.append(kwargs["run_id"])
+
+    protected = protect_langchain_runnable(fw, EchoModel().with_config(
+        configurable={"thread_id": "saved-thread"}, callbacks=[Observer()],
+    ))
+    RunnableLambda(lambda value: protected.invoke(value)).invoke("safe", config={"configurable": {"thread_id": "ambient-parent"}})
+    assert seen and all(kwargs["metadata"]["conversationId"] == "saved-thread" for _, kwargs in seen)
+    assert len(starts) == 1
+
+
+@pytest.mark.parametrize("method", ["invoke", "batch", "stream"])
+def test_protection_runs_existing_dynamic_config_factories_once_before_native_snapshot(monkeypatch, method):
+    from langchain_core.runnables import RunnableBinding
+
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    fw, seen = firewall(monkeypatch)
+    calls = []
+
+    def configure(config):
+        calls.append(config)
+        return {"configurable": {"thread_id": "routed-" + config["configurable"]["thread_id"]}}
+
+    configured = RunnableBinding(
+        bound=EchoModel(), config={"configurable": {"thread_id": "saved"}},
+        config_factories=[configure],
+    )
+    protected = protect_langchain_runnable(fw, configured, hooks=ALL_HOOKS)
+    config = {"configurable": {"thread_id": "requested"}}
+    if method == "invoke":
+        protected.invoke("safe", config=config)
+    elif method == "batch":
+        protected.batch(["safe"], config=config)
+    else:
+        assert list(protected.stream("safe", config=config))
+    assert len(calls) == 1
+    assert seen and all(kwargs["metadata"]["conversationId"] == "routed-requested" for _, kwargs in seen)
