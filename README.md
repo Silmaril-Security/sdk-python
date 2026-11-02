@@ -41,7 +41,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.8.0
+pip install silmaril-security-sdk==0.8.1
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -580,6 +580,8 @@ when invoking your graph or agent. Silmaril derives `metadata.conversationId`
 for each execution; no per-conversation handler or agent construction is needed.
 Calls without an available native thread ID omit conversation identity.
 Direct `classify()` and batch metadata APIs are unchanged.
+Version `0.8.1` preserves configured native routing through post-protection
+composition and supersedes `0.8.0` for this integration.
 
 
 Version `0.4.1` contains the public `0.4.x` SDK changes and supersedes the
@@ -634,6 +636,8 @@ or tool, then automatically sends it as `metadata.conversationId`. Normal
 `invoke`, `ainvoke`, `batch`, and streaming behavior and caller callbacks are
 preserved. Bind model-specific tools with `model.bind_tools(...)` before
 wrapping; the returned object exposes the standard Runnable interface.
+Post-protection configuration, argument binding, retry, listener and type
+composition preserve original configured layers and dynamic factories.
 Deep Agents users should use its protected constructor below. If no native ID
 is available, identity is omitted and checks continue independently. Handlers
 classify without a `GovernanceContext`. A governance `"block"` on the response
@@ -788,6 +792,6 @@ IDs must be non-empty; MCP tools also require their canonical server parent ID.
 The compatibility metadata copy remains attribution only. Caller agent metadata
 does not supply an authenticated principal.
 
-This source prepares version 0.8.0. Its registry install command becomes
+This source prepares version 0.8.1. Its registry install command becomes
 available after the authorized main-branch release workflow publishes the package.
 Confirm registry publication before installing this version.

@@ -61,6 +61,27 @@ assert len(factory_calls) == 1
 assert len(payloads) > before
 assert all(p["metadata"]["conversationId"] == "dynamic-before-protection" for p in payloads[before:])
 
+# Post-protection methods must layer around (rather than replace) original
+# factories on every supported core version, including core 0.2.0.
+for operation in ("config", "bind", "retry", "listeners", "types"):
+    before = len(payloads)
+    factory_calls.clear()
+    composed = protect_langchain_runnable(fw, RunnableBinding(bound=model, config_factories=[configure]))
+    if operation == "config":
+        composed = composed.with_config(configurable={"thread_id": "requested"})
+    elif operation == "bind":
+        composed = composed.bind(stop=["unused"])
+    elif operation == "retry":
+        composed = composed.with_retry(wait_exponential_jitter=False)
+    elif operation == "listeners":
+        composed = composed.with_listeners(on_start=lambda run: None)
+    else:
+        composed = composed.with_types(input_type=str)
+    composed.invoke("safe")
+    assert len(factory_calls) == 1
+    assert len(payloads) > before
+    assert all(p["metadata"]["conversationId"] == "dynamic-before-protection" for p in payloads[before:])
+
 if sys.version_info >= (3, 11):
     from silmaril_security.sdk.deepagents import create_protected_deep_agent
 

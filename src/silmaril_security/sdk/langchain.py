@@ -44,6 +44,8 @@ try:
     from langchain_core.callbacks import AsyncCallbackHandler, BaseCallbackHandler
     from langchain_core.runnables import Runnable, RunnableBinding, RunnableConfig
     from langchain_core.runnables.base import RunnableBindingBase
+
+    from silmaril_security.sdk._langchain_runnable import PreservingRunnable, register_handler
 except ImportError as exc:  # pragma: no cover - exercised by packaging consumers
     raise ImportError(
         "LangChain support requires the langchain extra: "
@@ -560,7 +562,7 @@ def protect_langchain_runnable(
         # native identity at the actual model/tool invocation boundary.
         protected = protect_langchain_runnable(firewall, runnable.bound, **handler_options)
         copy = getattr(runnable, "model_copy", None) or runnable.copy
-        return copy(update={"bound": protected})
+        return PreservingRunnable(copy(update={"bound": protected}))
 
     # Validate options eagerly; each actual invocation gets an independent
     # handler so no thread identity is stored on the reusable binding.
@@ -569,6 +571,7 @@ def protect_langchain_runnable(
 
     def make_callbacks(config):
         handler = handler_type(firewall, **handler_options)
+        register_handler(handler)
         normalized = ensure_config(config)
         _, identity = thread_identity(normalized, ambient=False)
         handler._thread_snapshot = (True, identity)
@@ -638,4 +641,4 @@ def protect_langchain_runnable(
                     for handler in created:
                         handler._thread_runs.clear()
 
-    return _ProtectedBinding(bound=runnable, config_factories=[native_callbacks])
+    return PreservingRunnable(_ProtectedBinding(bound=runnable, config_factories=[native_callbacks]))

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+
+- Preserve original native binding factories through post-protection
+  `with_config`, `bind`, retry, listener and type composition, including
+  minimum supported LangChain versions whose native binding methods drop
+  factories while rebuilding.
+- Keep native static defaults and dynamic routing active exactly once and
+  clear protected stream bookkeeping even through retained binding layers.
+- Verify post-protection composition against source and installed wheels.
+
 ## 0.8.0
 
 - Add `protect_langchain_runnable()` to capture exact per-invocation native

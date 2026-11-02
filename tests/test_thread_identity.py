@@ -709,3 +709,109 @@ def test_protection_runs_existing_dynamic_config_factories_once_before_native_sn
         assert list(protected.stream("safe", config=config))
     assert len(calls) == 1
     assert seen and all(kwargs["metadata"]["conversationId"] == "routed-requested" for _, kwargs in seen)
+
+
+@pytest.mark.parametrize("operation", ["config", "bind", "retry", "listeners", "types", "combined"])
+def test_post_protection_composition_preserves_original_dynamic_factories(monkeypatch, operation):
+    from langchain_core.runnables import RunnableBinding
+
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    fw, seen = firewall(monkeypatch)
+    factories = []
+    listeners = []
+
+    def configure(config):
+        factories.append(config)
+        return {"configurable": {"thread_id": "dynamic"}}
+
+    original = RunnableBinding(bound=EchoModel(), config_factories=[configure])
+    protected = protect_langchain_runnable(fw, original, hooks=ALL_HOOKS)
+    if operation == "config":
+        protected = protected.with_config(configurable={"thread_id": "requested"})
+    elif operation == "bind":
+        protected = protected.bind(stop=["unused"])
+    elif operation == "retry":
+        protected = protected.with_retry(wait_exponential_jitter=False, stop_after_attempt=2)
+    elif operation == "listeners":
+        protected = protected.with_listeners(on_start=lambda run: listeners.append(run.id))
+    elif operation == "types":
+        protected = protected.with_types(input_type=str, output_type=AIMessage)
+        assert protected.InputType is str
+    else:
+        protected = protected.with_config(configurable={"thread_id": "requested"}).bind(stop=["unused"]).with_retry(
+            wait_exponential_jitter=False,
+        ).with_listeners(on_start=lambda run: listeners.append(run.id)).with_types(input_type=str)
+    protected.invoke("safe")
+    assert len(factories) == 1
+    assert seen and all(kwargs["metadata"]["conversationId"] == "dynamic" for _, kwargs in seen)
+    if operation in {"listeners", "combined"}:
+        assert len(listeners) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_post_protection_composition_preserves_original_factories(monkeypatch):
+    from langchain_core.runnables import Runnable, RunnableBinding
+
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    if not hasattr(Runnable, "with_alisteners"):
+        pytest.skip("Minimum core has no native asynchronous listener API")
+    fw, seen = firewall(monkeypatch, asynchronous=True)
+    factories = []
+    listeners = []
+
+    def configure(config):
+        factories.append(config)
+        return {"configurable": {"thread_id": "dynamic-async"}}
+
+    async def on_start(run):
+        listeners.append(run.id)
+
+    original = RunnableBinding(bound=EchoModel(), config_factories=[configure])
+    protected = protect_langchain_runnable(fw, original, hooks=ALL_HOOKS).with_config(
+        configurable={"thread_id": "requested"},
+    ).with_alisteners(on_start=on_start).with_types(input_type=str)
+    await protected.ainvoke("safe")
+    assert len(factories) == 1 and len(listeners) == 1
+    assert seen and all(kwargs["metadata"]["conversationId"] == "dynamic-async" for _, kwargs in seen)
+    await fw.aclose()
+
+
+@pytest.mark.asyncio
+async def test_composed_async_stream_close_cleans_inner_handler_and_context(monkeypatch):
+    from langchain_core.callbacks import AsyncCallbackManager
+    from langchain_core.runnables import Runnable, RunnableBinding
+
+    from silmaril_security.sdk._langchain_runnable import _HANDLERS
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    retained = []
+    factories = []
+
+    class Unfinished(Runnable):
+        def invoke(self, input, config=None, **kwargs):
+            return input
+
+        async def astream(self, input, config=None, **kwargs):
+            manager = AsyncCallbackManager.configure(inheritable_callbacks=config["callbacks"])
+            retained.extend(manager.handlers)
+            await manager.on_chain_start({}, input)
+            yield input
+            yield input
+
+    def configure(config):
+        factories.append(config)
+        return {"configurable": {"thread_id": "composed-stream"}}
+
+    fw, _ = firewall(monkeypatch, asynchronous=True)
+    original = RunnableBinding(bound=Unfinished(), config_factories=[configure])
+    protected = protect_langchain_runnable(fw, original).with_config(tags=["composed"])
+    stream = protected.astream("safe")
+    assert await anext(stream) == "safe"
+    assert _HANDLERS.get() is None
+    assert retained[0]._thread_runs._runs
+    await stream.aclose()
+    assert retained[0]._thread_runs._runs == {} and _HANDLERS.get() is None
+    assert len(factories) == 1
+    await fw.aclose()
