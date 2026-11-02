@@ -134,6 +134,13 @@ jobs:
       - name: Check package metadata
         run: python -m twine check dist/*
 
+      - name: Verify installed wheel thread identity
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          cp scripts/verify_thread_package.py "$RUNNER_TEMP/verify_thread_package.py"
+          cd "$RUNNER_TEMP"
+          python verify_thread_package.py
+
       - name: Upload distribution
         uses: actions/upload-artifact@v4
         with:

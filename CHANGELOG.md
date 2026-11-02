@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.0
+
+- Add `protect_langchain_runnable()` to capture exact per-invocation native
+  identity at standalone model/tool boundaries, preserving normal runnable
+  callbacks, batching and streaming.
+- Automatically use the active native `configurable.thread_id` as Firewall
+  conversation identity in sync/async LangChain callbacks and Deep Agents
+  model/tool middleware. Reusable agents and concurrent threads retain separate
+  identities; threadless checks omit conversation identity.
+- **Breaking:** remove handler and middleware `conversation_id` options. Pass
+  the framework thread ID at invocation instead. Direct `classify()` metadata
+  APIs are unchanged.
+- Retain callback identities through metadata-free completion events and clear
+  state after completion, errors, blocking exceptions, and root termination.
+  Bound outstanding callback bookkeeping and clear protected streaming
+  invocations when consumers close early. Callback-only integrations omit
+  ambiguous nested standalone identity rather than borrowing a parent ID.
+- Cover native identity with real framework execution, subagent, concurrency,
+  checkpoint-continuation, and minimum-dependency tests.
+
 ## 0.7.6
 
 - Reject negative `detector_counts` before returning results or invoking

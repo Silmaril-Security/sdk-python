@@ -24,7 +24,7 @@ def _request(messages=None, *, args=None):
     state = {"messages": messages or []}
     return SimpleNamespace(
         messages=state["messages"], state=state,
-        runtime=SimpleNamespace(config={"run_id": "run-1"}),
+        runtime=SimpleNamespace(config={"run_id": "run-1", "configurable": {"thread_id": "conversation-1"}}),
         tool_call={"id": "call-1", "name": "search", "args": args or {"query": "safe"}},
     )
 
@@ -56,7 +56,7 @@ def test_sync_boundaries_continue_without_leaking(monkeypatch):
         return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
-    middleware = create_deepagents_middleware(fw, on_classify=events.append, max_blocked_attempts=2, conversation_id="conversation-1")
+    middleware = create_deepagents_middleware(fw, on_classify=events.append, max_blocked_attempts=2)
     calls = []
     request = _request([HumanMessage("hello")], args={"query": "deny"})
     result = middleware.wrap_tool_call(request, lambda _: calls.append("ran"))

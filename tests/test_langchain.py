@@ -78,9 +78,9 @@ def test_langchain_tool_hooks_have_distinct_request_ids(monkeypatch):
         return BlockResult(prediction="BENIGN", score=0.1, threshold=0.5, mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
-    handler = fw.as_langchain_handler(conversation_id="conversation-1")
+    handler = fw.as_langchain_handler()
     run_id = uuid4()
-    handler.on_tool_start({"name": "search"}, '{"query":"safe"}', run_id=run_id)
+    handler.on_tool_start({"name": "search"}, '{"query":"safe"}', run_id=run_id, metadata={"thread_id": "conversation-1"})
     handler.on_tool_end("result", run_id=run_id, name="search")
     assert [call[1]["hook"] for call in calls] == [HookLabel.TOOL_CALL, HookLabel.TOOL_RESPONSE]
     assert calls[0][1]["request_id"] != calls[1][1]["request_id"]

@@ -41,7 +41,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.7.6
+pip install silmaril-security-sdk==0.8.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -574,6 +574,14 @@ calls are appropriate for independent events or different conversations.
 
 ## Migration Notes
 
+Version `0.8.0` removes the `conversation_id` option from framework handlers
+and middleware. Set only the framework’s native `configurable.thread_id`
+when invoking your graph or agent. Silmaril derives `metadata.conversationId`
+for each execution; no per-conversation handler or agent construction is needed.
+Calls without an available native thread ID omit conversation identity.
+Direct `classify()` and batch metadata APIs are unchanged.
+
+
 Version `0.4.1` contains the public `0.4.x` SDK changes and supersedes the
 unpublished `0.4.0` package. The `v0.4.0` Git tag exists, but PyPI publishing
 failed before the package was created, so `0.4.1` is the next installable
@@ -591,17 +599,24 @@ Install the optional extra:
 pip install "silmaril-security-sdk[langchain]"
 ```
 
-Create a handler from the same client:
+Protect the model or tool once at its invocation boundary:
 
 ```python
 from langchain_openai import ChatOpenAI
 from silmaril_security.sdk import Firewall
+from silmaril_security.sdk.langchain import protect_langchain_runnable
 
 fw = Firewall(api_key=api_key, api_url=api_url)
-handler = fw.as_langchain_handler()
+model = ChatOpenAI()
+agent = protect_langchain_runnable(fw, model)
 
-model = ChatOpenAI(callbacks=[handler])
-model.invoke("Hello")
+# Reuse this protected runnable across conversations.
+agent.invoke("Hello", config={
+    "configurable": {"thread_id": "conversation-a"},
+})
+agent.invoke("Another conversation", config={
+    "configurable": {"thread_id": "conversation-b"},
+})
 ```
 
 The LangChain handler is fail-open by default: infrastructure errors are logged
@@ -613,16 +628,37 @@ end even if those hooks are enabled. `include_system` is stored and unused
 when the handler selects text. Model start classifies the latest user message
 and leaves earlier tool messages for the tool hooks. Each callback gets a
 distinct `metadata.silmaril.request_id`; its LangChain run ID is sent as
-`metadata.langgraph.run_id`. Pass `conversation_id=` when the backend should
-correlate a sequence; the handler sends `metadata.conversationId`. Handlers
+`metadata.langgraph.run_id`. `protect_langchain_runnable()` reads native
+`configurable.thread_id` at each invocation before calling the wrapped model
+or tool, then automatically sends it as `metadata.conversationId`. Normal
+`invoke`, `ainvoke`, `batch`, and streaming behavior and caller callbacks are
+preserved. Bind model-specific tools with `model.bind_tools(...)` before
+wrapping; the returned object exposes the standard Runnable interface.
+Deep Agents users should use its protected constructor below. If no native ID
+is available, identity is omitted and checks continue independently. Handlers
 classify without a `GovernanceContext`. A governance `"block"` on the response
 still raises `FirewallBlockedException` in Block mode.
 
 Async LangChain:
 
 ```python
-handler = fw.as_async_langchain_handler()
+protected_model = protect_langchain_runnable(async_fw, model)
+result = await protected_model.ainvoke(
+    "Hello", config={"configurable": {"thread_id": "conversation-a"}},
+)
 ```
+
+Existing callback-only integrations can still use `fw.as_langchain_handler()`
+or `fw.as_async_langchain_handler()`. They use exposed native thread metadata
+and active graph config. Ambiguous nested standalone callbacks omit identity.
+Framework versions can hide a direct
+model/tool invocation’s native config from ordinary callbacks, including a
+child override inside an existing thread. Use `protect_langchain_runnable()`
+at that model/tool boundary when native identity must be exact. Do not attach
+a second Silmaril handler to the same protected boundary. Callback bookkeeping
+is bounded to 4096 outstanding runs; when frameworks omit termination signals,
+oldest root/subtree entries are evicted and late completions omit unavailable
+identity. Protected `stream`/`astream` calls clear their own tracking on close.
 
 Calling `as_async_langchain_handler()` on an `AsyncFirewall` shares its
 persistent pool. Calling it on a synchronous `Firewall` remains supported and
@@ -637,9 +673,17 @@ from silmaril_security.sdk.deepagents import create_protected_deep_agent
 agent = create_protected_deep_agent(
     fw, model=model, tools=tools,
     subagents=[{"name": "research", "description": "Research safely"}],
-    middleware_options={"conversation_id": conversation_id},
+)
+agent.invoke(
+    {"messages": [{"role": "user", "content": "Research Redis Streams"}]},
+    config={"configurable": {"thread_id": "conversation-a"}},
 )
 ```
+
+The same agent can handle many native threads. Every model/tool boundary
+uses the current execution’s native thread ID, including nested subagents
+that inherit their parent thread. Separately executed graphs retain their own
+native IDs. No thread ID means no conversation identity.
 
 The constructor installs checks on the root, general-purpose, and declarative
 subagents. Create a compiled subagent with
@@ -712,6 +756,11 @@ python -m build
 python -m twine check dist/*
 ```
 
+Additional CI jobs exercise the minimum `langchain-core==0.2.0` on Python
+3.10 and `deepagents==0.7.21` on Python 3.11. CI explicitly imports configured
+integrations before tests, and CI/release verify the built wheel outside the
+source checkout with `scripts/verify_thread_package.py`.
+
 The release workflow uses Python 3.12 and the Deep Agents install above. It
 runs `ruff check src tests`, then `python -m pytest -q -m "not integration"`,
 then `python -m build` and `python -m twine check dist/*`. Local setup and the
@@ -739,6 +788,6 @@ IDs must be non-empty; MCP tools also require their canonical server parent ID.
 The compatibility metadata copy remains attribution only. Caller agent metadata
 does not supply an authenticated principal.
 
-This source prepares version 0.7.6. Its registry install command becomes
+This source prepares version 0.8.0. Its registry install command becomes
 available after the authorized main-branch release workflow publishes the package.
 Confirm registry publication before installing this version.
