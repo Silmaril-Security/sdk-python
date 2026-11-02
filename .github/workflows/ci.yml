@@ -40,6 +40,13 @@ jobs:
       - name: Ruff
         run: ruff check src tests
 
+      - name: Require configured integrations
+        run: |
+          python -c "import langchain_core"
+          if [[ "${{ matrix.python-version }}" != "3.10" ]]; then
+            python -c "import deepagents"
+          fi
+
       - name: Pytest
         run: pytest -q
 
@@ -48,3 +55,37 @@ jobs:
 
       - name: Check package metadata
         run: python -m twine check dist/*
+
+      - name: Verify installed wheel thread identity
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          cp scripts/verify_thread_package.py "$RUNNER_TEMP/verify_thread_package.py"
+          cd "$RUNNER_TEMP"
+          python verify_thread_package.py
+
+  minimum-integrations:
+    name: Minimum ${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: langchain
+            python: "3.10"
+            dependency: "langchain-core==0.2.0"
+            extras: "langchain"
+          - profile: deepagents
+            python: "3.11"
+            dependency: "deepagents==0.7.21"
+            extras: "langchain,deepagents"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install minimum supported integration
+        run: python -m pip install -e ".[${{ matrix.extras }}]" "${{ matrix.dependency }}" "pytest>=7.4.0" "pytest-asyncio>=0.23.0"
+      - name: Require the selected integration
+        run: python -c "import ${{ matrix.profile == 'langchain' && 'langchain_core' || 'deepagents' }}"
+      - name: Exercise native thread integration
+        run: python -m pytest tests/test_langchain.py tests/test_thread_identity.py -q

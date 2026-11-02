@@ -8,6 +8,10 @@ from typing import Any, NamedTuple
 from uuid import uuid4
 from weakref import WeakValueDictionary, ref
 
+from silmaril_security.sdk._thread_identity import (
+    conversation_metadata,
+    reject_conversation_options,
+)
 from silmaril_security.sdk.async_firewall import AsyncFirewall
 from silmaril_security.sdk.exceptions import ReviewCompatibilityError
 from silmaril_security.sdk.firewall import Firewall
@@ -70,16 +74,18 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         mode: FirewallMode | None = None,
         fail_open: bool = True,
         max_blocked_attempts: int = 3,
-        conversation_id: str | None = None,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
+        **removed_options: Any,
     ) -> None:
+        reject_conversation_options(removed_options)
+        if removed_options:
+            raise TypeError(f"Unexpected options: {sorted(removed_options)}")
         if max_blocked_attempts < 1:
             raise ValueError("max_blocked_attempts must be positive")
         self.firewall = firewall
         self.mode = firewall._effective_mode(mode, None)
         self.fail_open = fail_open
         self.max_blocked_attempts = max_blocked_attempts
-        self.conversation_id = conversation_id
         self.on_classify = on_classify
 
     def _metadata(self, request: Any) -> dict[str, Any]:
@@ -87,8 +93,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         config = getattr(getattr(request, "runtime", None), "config", None)
         if isinstance(config, dict) and config.get("run_id") is not None:
             metadata["langgraph"] = {"run_id": str(config["run_id"])}
-        if self.conversation_id is not None:
-            metadata["conversationId"] = self.conversation_id
+        metadata.update(conversation_metadata(config))
         return metadata
 
     def _observe(self, event: ClassifyEvent) -> None:
@@ -306,6 +311,7 @@ def create_protected_compiled_subagent(
     """Compile a subagent with Silmaril installed and register its graph identity."""
     from langchain.agents import create_agent
 
+    reject_conversation_options(agent_kwargs)
     runnable = create_agent(
         model=model, tools=list(tools),
         middleware=[*middleware, create_deepagents_middleware(firewall, **(middleware_options or {}))],
@@ -326,6 +332,7 @@ def create_protected_deep_agent(
         from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
     except ImportError as exc:  # pragma: no cover
         raise ImportError('Install "silmaril-security-sdk[deepagents]"') from exc
+    reject_conversation_options(kwargs)
     options = middleware_options or {}
     root = create_deepagents_middleware(firewall, **options)
     protected: list[dict[str, Any]] = []
