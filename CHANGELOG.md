@@ -8,6 +8,8 @@
   factories while rebuilding.
 - Keep native static defaults and dynamic routing active exactly once and
   clear protected stream bookkeeping even through retained binding layers.
+- Forward sync/async transforms incrementally and clean up closed or failed
+  iterators without buffering upstream chunks.
 - Verify post-protection composition against source and installed wheels.
 
 ## 0.8.0

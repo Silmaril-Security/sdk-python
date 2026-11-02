@@ -1,11 +1,12 @@
 """Exercise the installed distribution; run outside the source checkout."""
 
+import asyncio
 import sys
 from importlib.metadata import version
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
-from langchain_core.runnables import RunnableBinding
+from langchain_core.runnables import RunnableBinding, RunnableGenerator
 
 from silmaril_security.sdk import Firewall, __version__
 from silmaril_security.sdk.langchain import protect_langchain_runnable
@@ -81,6 +82,56 @@ for operation in ("config", "bind", "retry", "listeners", "types"):
     assert len(factory_calls) == 1
     assert len(payloads) > before
     assert all(p["metadata"]["conversationId"] == "dynamic-before-protection" for p in payloads[before:])
+
+# A protected downstream stage must consume and emit chunks incrementally.
+consumed = []
+
+
+def upstream(inputs):
+    consumed.append("first")
+    yield "one"
+    consumed.append("second")
+    yield "two"
+
+
+def downstream(inputs):
+    for value in inputs:
+        yield value.upper()
+
+
+pipeline = RunnableGenerator(upstream) | protect_langchain_runnable(fw, RunnableGenerator(downstream))
+stream = pipeline.stream("start")
+assert next(stream) == "ONE" and consumed == ["first"]
+assert next(stream) == "TWO" and consumed == ["first", "second"]
+stream.close()
+
+async def verify_incremental_async_transform():
+    consumed = []
+
+    async def upstream(inputs):
+        consumed.append("first")
+        yield "one"
+        consumed.append("second")
+        yield "two"
+
+    async def downstream(inputs):
+        async for value in inputs:
+            yield value.upper()
+
+    pipeline = RunnableGenerator(upstream) | protect_langchain_runnable(fw, RunnableGenerator(downstream))
+    stream = pipeline.astream("start")
+    assert await anext(stream) == "ONE" and consumed == ["first"]
+    assert await anext(stream) == "TWO" and consumed == ["first", "second"]
+    try:
+        await anext(stream)
+    except StopAsyncIteration:
+        pass
+    else:
+        raise AssertionError("unexpected extra stream chunk")
+    await stream.aclose()
+
+
+asyncio.run(verify_incremental_async_transform())
 
 if sys.version_info >= (3, 11):
     from silmaril_security.sdk.deepagents import create_protected_deep_agent

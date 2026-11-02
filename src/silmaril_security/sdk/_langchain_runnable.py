@@ -91,11 +91,15 @@ class PreservingRunnable(Runnable[_Input, _Output]):
             if owner:
                 _clear(handlers)
 
-    def stream(self, input: _Input, config: RunnableConfig | None = None, **kwargs: Any) -> Iterator[_Output]:
+    def _iterate(self, make_iterator) -> Iterator[_Output]:
         handlers, owner = self._scope()
         token = _HANDLERS.set(handlers)
         try:
-            iterator = self.bound.stream(input, config, **kwargs)
+            iterator = make_iterator()
+        except BaseException:
+            if owner:
+                _clear(handlers)
+            raise
         finally:
             _HANDLERS.reset(token)
         try:
@@ -122,11 +126,15 @@ class PreservingRunnable(Runnable[_Input, _Output]):
                 if owner:
                     _clear(handlers)
 
-    async def astream(self, input: _Input, config: RunnableConfig | None = None, **kwargs: Any) -> AsyncIterator[_Output]:
+    async def _aiterate(self, make_iterator) -> AsyncIterator[_Output]:
         handlers, owner = self._scope()
         token = _HANDLERS.set(handlers)
         try:
-            iterator = self.bound.astream(input, config, **kwargs)
+            iterator = make_iterator()
+        except BaseException:
+            if owner:
+                _clear(handlers)
+            raise
         finally:
             _HANDLERS.reset(token)
         try:
@@ -152,6 +160,28 @@ class PreservingRunnable(Runnable[_Input, _Output]):
                 _HANDLERS.reset(token)
                 if owner:
                     _clear(handlers)
+
+    def stream(self, input: _Input, config: RunnableConfig | None = None, **kwargs: Any) -> Iterator[_Output]:
+        yield from self._iterate(lambda: self.bound.stream(input, config, **kwargs))
+
+    def transform(self, input: Iterator[_Input], config: RunnableConfig | None = None, **kwargs: Any) -> Iterator[_Output]:
+        yield from self._iterate(lambda: self.bound.transform(input, config, **kwargs))
+
+    async def astream(self, input: _Input, config: RunnableConfig | None = None, **kwargs: Any) -> AsyncIterator[_Output]:
+        iterator = self._aiterate(lambda: self.bound.astream(input, config, **kwargs))
+        try:
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            await iterator.aclose()
+
+    async def atransform(self, input: AsyncIterator[_Input], config: RunnableConfig | None = None, **kwargs: Any) -> AsyncIterator[_Output]:
+        iterator = self._aiterate(lambda: self.bound.atransform(input, config, **kwargs))
+        try:
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            await iterator.aclose()
 
     def with_config(self, config=None, **kwargs):
         return PreservingRunnable(Runnable.with_config(self, config, **kwargs))

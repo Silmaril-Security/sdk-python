@@ -815,3 +815,174 @@ async def test_composed_async_stream_close_cleans_inner_handler_and_context(monk
     assert retained[0]._thread_runs._runs == {} and _HANDLERS.get() is None
     assert len(factories) == 1
     await fw.aclose()
+
+
+def test_protected_generator_sequence_keeps_incremental_input_chunks(monkeypatch):
+    from langchain_core.runnables import RunnableGenerator
+
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    fw, _ = firewall(monkeypatch)
+    consumed = []
+
+    def upstream(inputs):
+        consumed.append("first")
+        yield "one"
+        consumed.append("second")
+        yield "two"
+
+    def downstream(inputs):
+        for value in inputs:
+            yield value.upper()
+
+    pipeline = RunnableGenerator(upstream) | protect_langchain_runnable(
+        fw, RunnableGenerator(downstream),
+    ).with_config(tags=["composed"])
+    stream = pipeline.stream("start")
+    assert next(stream) == "ONE"
+    assert consumed == ["first"]
+    assert next(stream) == "TWO"
+    assert consumed == ["first", "second"]
+    stream.close()
+
+
+@pytest.mark.asyncio
+async def test_protected_async_generator_sequence_keeps_incremental_input_chunks(monkeypatch):
+    from langchain_core.runnables import RunnableGenerator
+
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    fw, _ = firewall(monkeypatch, asynchronous=True)
+    consumed = []
+
+    async def upstream(inputs):
+        consumed.append("first")
+        yield "one"
+        consumed.append("second")
+        yield "two"
+
+    async def downstream(inputs):
+        async for value in inputs:
+            yield value.upper()
+
+    pipeline = RunnableGenerator(upstream) | protect_langchain_runnable(
+        fw, RunnableGenerator(downstream),
+    ).with_config(tags=["composed"])
+    stream = pipeline.astream("start")
+    assert await anext(stream) == "ONE"
+    assert consumed == ["first"]
+    assert await anext(stream) == "TWO"
+    assert consumed == ["first", "second"]
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    await stream.aclose()
+    await fw.aclose()
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_protected_transform_cleanup_with_missing_terminal_event(monkeypatch, raises):
+    from langchain_core.callbacks import CallbackManager
+    from langchain_core.runnables import Runnable
+
+    from silmaril_security.sdk._langchain_runnable import _HANDLERS
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    retained = []
+
+    class Unfinished(Runnable):
+        def invoke(self, input, config=None, **kwargs):
+            return input
+
+        def transform(self, input, config=None, **kwargs):
+            manager = CallbackManager.configure(inheritable_callbacks=config["callbacks"])
+            retained.extend(manager.handlers)
+            manager.on_chain_start({}, {})
+            if raises:
+                raise RuntimeError("before first output")
+            yield from input
+
+    fw, _ = firewall(monkeypatch)
+    protected = protect_langchain_runnable(fw, Unfinished()).with_config(configurable={"thread_id": "transform"})
+    stream = protected.transform(iter(["one", "two"]))
+    if raises:
+        with pytest.raises(RuntimeError, match="before first output"):
+            next(stream)
+    else:
+        assert next(stream) == "one"
+        assert retained[0]._thread_runs._runs
+        stream.close()
+    assert retained and retained[0]._thread_runs._runs == {}
+    assert _HANDLERS.get() is None
+
+
+@pytest.mark.asyncio
+async def test_protected_async_transform_close_cleans_inner_handler(monkeypatch):
+    from langchain_core.callbacks import AsyncCallbackManager
+    from langchain_core.runnables import Runnable
+
+    from silmaril_security.sdk._langchain_runnable import _HANDLERS
+    from silmaril_security.sdk.langchain import protect_langchain_runnable
+
+    retained = []
+
+    class Unfinished(Runnable):
+        def invoke(self, input, config=None, **kwargs):
+            return input
+
+        async def atransform(self, input, config=None, **kwargs):
+            manager = AsyncCallbackManager.configure(inheritable_callbacks=config["callbacks"])
+            retained.extend(manager.handlers)
+            await manager.on_chain_start({}, {})
+            async for value in input:
+                yield value
+
+    async def inputs():
+        yield "one"
+        yield "two"
+
+    fw, _ = firewall(monkeypatch, asynchronous=True)
+    protected = protect_langchain_runnable(fw, Unfinished()).with_config(configurable={"thread_id": "transform"})
+    stream = protected.atransform(inputs())
+    assert await anext(stream) == "one"
+    assert retained[0]._thread_runs._runs
+    assert _HANDLERS.get() is None
+    await stream.aclose()
+    assert retained[0]._thread_runs._runs == {} and _HANDLERS.get() is None
+    await fw.aclose()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.asyncio
+async def test_bridge_cleans_handlers_when_iterator_creation_raises(asynchronous):
+    from types import SimpleNamespace
+
+    from langchain_core.runnables import Runnable
+
+    from silmaril_security.sdk._langchain_runnable import (
+        _HANDLERS,
+        PreservingRunnable,
+        register_handler,
+    )
+
+    retained = {"active": "identity"}
+    handler = SimpleNamespace(_thread_runs=SimpleNamespace(clear=retained.clear))
+
+    class FailingIterator(Runnable):
+        def invoke(self, input, config=None, **kwargs):
+            return input
+
+        def stream(self, input, config=None, **kwargs):
+            register_handler(handler)
+            raise RuntimeError("iterator creation")
+
+        def astream(self, input, config=None, **kwargs):
+            register_handler(handler)
+            raise RuntimeError("iterator creation")
+
+    protected = PreservingRunnable(FailingIterator())
+    with pytest.raises(RuntimeError, match="iterator creation"):
+        if asynchronous:
+            await anext(protected.astream("safe"))
+        else:
+            next(protected.stream("safe"))
+    assert retained == {} and _HANDLERS.get() is None
