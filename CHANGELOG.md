@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.2
 
 - Reject zero and non-finite synchronous request timeouts when constructing the
   client, before they can fail inside the HTTP transport.
