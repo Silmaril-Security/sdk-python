@@ -189,7 +189,7 @@ Firewall(
     *,
     api_key: str,                                  # required
     api_url: str,                                  # required
-    timeout: float = 10.0,                         # request timeout in seconds
+    timeout: float = 10.0,                         # positive, finite request timeout in seconds
     mode: Literal["shadow", "warn", "block"] | None = None,
     shadow_mode: bool | None = None,               # deprecated legacy mapping
     review: Literal["standard", "deep"] | None = None,  # omit to inherit AppConfig
