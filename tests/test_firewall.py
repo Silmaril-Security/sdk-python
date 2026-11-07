@@ -93,6 +93,12 @@ def test_constructor_requires_key_and_url():
         Firewall(api_key="sk", api_url="")
 
 
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("-inf"), float("nan")])
+def test_constructor_rejects_invalid_sync_timeout(timeout):
+    with pytest.raises(ValueError, match="timeout must be positive and finite"):
+        Firewall(api_key="sk-test", api_url=TEST_API_URL, timeout=timeout)
+
+
 def test_constructor_preserves_session_defaults_and_unrelated_request_headers():
     session = requests.Session()
     session.headers["X-Custom-Default"] = "preserved"
@@ -115,8 +121,9 @@ def test_deprecated_exception_names_alias_new_names():
     assert BatchPromptBlockedException is BatchFirewallBlockedException
 
 
-def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
-    fw = Firewall(api_key="sk-test", api_url=TEST_API_URL)
+@pytest.mark.parametrize("timeout", [0.001, 10.0])
+def test_classify_posts_wire_shape_and_returns_result(monkeypatch, timeout):
+    fw = Firewall(api_key="sk-test", api_url=TEST_API_URL, timeout=timeout)
     calls: list[dict[str, Any]] = []
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
@@ -143,7 +150,7 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch):
         "x-api-key": "sk-test",
         "content-type": "application/json",
     }
-    assert calls[0]["timeout"] == 10.0
+    assert calls[0]["timeout"] == timeout
     assert calls[0]["allow_redirects"] is False
     assert calls[0]["stream"] is True
     assert json.loads(calls[0]["data"]) == {

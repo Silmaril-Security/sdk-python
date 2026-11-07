@@ -41,7 +41,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.8.1
+pip install silmaril-security-sdk==0.8.2
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -189,7 +189,7 @@ Firewall(
     *,
     api_key: str,                                  # required
     api_url: str,                                  # required
-    timeout: float = 10.0,                         # request timeout in seconds
+    timeout: float = 10.0,                         # positive, finite request timeout in seconds
     mode: Literal["shadow", "warn", "block"] | None = None,
     shadow_mode: bool | None = None,               # deprecated legacy mapping
     review: Literal["standard", "deep"] | None = None,  # omit to inherit AppConfig
@@ -792,6 +792,6 @@ IDs must be non-empty; MCP tools also require their canonical server parent ID.
 The compatibility metadata copy remains attribution only. Caller agent metadata
 does not supply an authenticated principal.
 
-This source prepares version 0.8.1. Its registry install command becomes
+This source prepares version 0.8.2. Its registry install command becomes
 available after the authorized main-branch release workflow publishes the package.
 Confirm registry publication before installing this version.
