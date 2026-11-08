@@ -11,12 +11,36 @@ permissions:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
+    name: Python ${{ matrix.python-version }} (${{ matrix.profile }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - python-version: "3.10"
+            extras: "dev,async,langchain"
+            profile: "core/async/LangChain"
+            deepagents: false
+          - python-version: "3.11"
+            extras: "dev,async,langchain,deepagents"
+            profile: "core/async/LangChain/Deep Agents"
+            deepagents: true
+          - python-version: "3.12"
+            extras: "dev,async,langchain,deepagents"
+            profile: "core/async/LangChain/Deep Agents"
+            deepagents: true
+          - python-version: "3.13"
+            extras: "dev,async,langchain,deepagents"
+            profile: "core/async/LangChain/Deep Agents"
+            deepagents: true
+          - python-version: "3.14"
+            extras: "dev,async,langchain,deepagents"
+            profile: "core/async/LangChain/Deep Agents"
+            deepagents: true
+          - python-version: "3.15"
+            extras: "dev,async,langchain,deepagents"
+            profile: "core/async/LangChain/Deep Agents"
+            deepagents: true
 
     steps:
       - name: Checkout
@@ -31,20 +55,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [[ "${{ matrix.python-version }}" == "3.10" ]]; then
-            python -m pip install -e ".[dev,langchain]"
-          else
-            python -m pip install -e ".[dev,langchain,deepagents]"
-          fi
+          python -m pip install -e ".[${{ matrix.extras }}]"
 
       - name: Ruff
         run: ruff check src tests
 
       - name: Require configured integrations
         run: |
+          python -c "import httpx"
           python -c "import langchain_core"
-          if [[ "${{ matrix.python-version }}" != "3.10" ]]; then
+          if [[ "${{ matrix.deepagents }}" == "true" ]]; then
             python -c "import deepagents"
+          else
+            python -c "import importlib.util; assert importlib.util.find_spec('deepagents') is None"
           fi
 
       - name: Pytest
