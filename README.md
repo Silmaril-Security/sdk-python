@@ -53,6 +53,26 @@ pip install "git+https://github.com/Silmaril-Security/sdk-python.git@main"
 
 Requires Python 3.10 or later.
 
+### Python support
+
+| Python | Core client | Async client | LangChain | Deep Agents |
+| --- | --- | --- | --- | --- |
+| 3.10 | Supported (legacy) | Supported (legacy) | Supported (legacy) | Not installed by the extra |
+| 3.11-3.13 | Supported | Supported | Supported | Supported |
+| 3.14 | Supported | Supported | Supported | Supported |
+| 3.15 | Supported | Supported | Supported | Supported |
+
+Python 3.10 remains the package minimum and retains a compatibility lane even
+though the CPython project has ended upstream support. Removing that lane or
+raising `requires-python` requires a separately announced compatibility
+decision; upstream end-of-life alone does not remove SDK support.
+
+The core classifiers and CI cover every core runtime in the table. New CPython
+releases are added after the core, async, installed-wheel, and applicable
+adapter checks can run. Optional integrations may have a narrower range:
+their support begins only when their dependencies install and their adapter
+tests pass. Deep Agents is currently qualified on Python 3.11 through 3.15.
+
 The distribution name is `silmaril-security-sdk`. The SDK import path is
 `silmaril_security.sdk`, so call sites use `Firewall`, `HookLabel`, and
 `FirewallBlockedException` from that package.
@@ -63,7 +83,10 @@ Optional LangChain support. That extra installs `langchain-core>=0.2.0` and `htt
 pip install "silmaril-security-sdk[langchain]"
 ```
 
-Optional Deep Agents support. On Python 3.11 or later that extra installs `deepagents>=0.7.21,<0.8` and `httpx>=0.25.0`. On Python 3.10 the environment marker skips the `deepagents` package.
+Optional Deep Agents support. On Python 3.11 or later that extra installs
+`deepagents>=0.7.21,<0.8` and `httpx>=0.25.0`. The supported runtime
+range is Python 3.11 through 3.15. On Python 3.10 the environment marker skips
+the `deepagents` package.
 
 ```sh
 pip install "silmaril-security-sdk[deepagents]"
@@ -750,8 +773,10 @@ parser.
 ## Development
 
 Pull-request CI is `.github/workflows/ci.yml`. Python 3.10 installs
-`.[dev,langchain]`; Python 3.11, 3.12, and 3.13 install
-`.[dev,langchain,deepagents]`. The job then runs:
+`.[dev,async,langchain]`; Python 3.11 through 3.15 install
+`.[dev,async,langchain,deepagents]`. Every configured integration is explicitly
+imported before the test suite, so a missing dependency cannot become a silent
+test skip. The job then runs:
 
 ```sh
 ruff check src tests
@@ -762,8 +787,8 @@ python -m twine check dist/*
 
 Additional CI jobs exercise the minimum `langchain-core==0.2.0` on Python
 3.10 and `deepagents==0.7.21` on Python 3.11. CI explicitly imports configured
-integrations before tests, and CI/release verify the built wheel outside the
-source checkout with `scripts/verify_thread_package.py`.
+integrations before tests. CI/release verify the built wheel outside the source
+checkout with `scripts/verify_thread_package.py`.
 
 The release workflow uses Python 3.12 and the Deep Agents install above. It
 runs `ruff check src tests`, then `python -m pytest -q -m "not integration"`,

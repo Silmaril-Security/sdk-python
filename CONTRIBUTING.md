@@ -8,7 +8,22 @@ of an integration with Silmaril services.
 ## Development
 
 Use Python 3.10 or later. Pull-request CI in `.github/workflows/ci.yml` tests
-3.10, 3.11, 3.12, and 3.13.
+3.10 through 3.15.
+
+| Python | Core/async/LangChain | Deep Agents | Policy |
+| --- | --- | --- | --- |
+| 3.10 | Qualified | Not installed by the extra | Legacy minimum |
+| 3.11-3.13 | Qualified | Qualified | Supported |
+| 3.14 | Qualified | Qualified | Supported |
+| 3.15 | Qualified | Qualified | Supported |
+
+Python 3.10 remains in CI after its upstream end-of-life because changing the
+published `>=3.10` minimum is a separate compatibility decision. Do not remove
+a legacy-minimum lane or raise `requires-python` as routine lifecycle cleanup.
+Add a new CPython runtime after its core, async, installed-wheel, and applicable
+adapter checks can run. An optional integration is supported only on runtimes
+where its dependency installation, explicit import, and adapter tests pass;
+Deep Agents is currently qualified on Python 3.11 through 3.15.
 
 ```sh
 python -m venv .venv
@@ -21,10 +36,10 @@ provides `build`, `pytest`, `pytest-asyncio`, `ruff`, and `twine`.
 
 ```sh
 # Python 3.10
-python -m pip install -e ".[dev,langchain]"
+python -m pip install -e ".[dev,async,langchain]"
 
-# Python 3.11 and later, including the release workflow's Python 3.12 job
-python -m pip install -e ".[dev,langchain,deepagents]"
+# Python 3.11 through 3.15, including the release workflow's Python 3.12 job
+python -m pip install -e ".[dev,async,langchain,deepagents]"
 ```
 
 Run the pull-request checks:
