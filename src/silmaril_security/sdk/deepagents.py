@@ -263,10 +263,10 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         if not thread_id or not isinstance(message.id, str) or not message.id:
             return None
         try:
-            payload = json.dumps([message.content, message.additional_kwargs], sort_keys=True, ensure_ascii=False)
+            payload = json.dumps([message.content, message.additional_kwargs], sort_keys=True)
         except (TypeError, ValueError):
             return None
-        return thread_id, message.id, hashlib.sha256(payload.encode()).hexdigest(), self.mode
+        return thread_id, message.id, hashlib.sha256(payload.encode("ascii")).hexdigest(), self.mode
 
     def _cached_notification(self, key: Any) -> bool | None:
         with self._notification_lock:

@@ -328,3 +328,25 @@ def test_notification_cache_is_bound_to_thread_content_and_success(monkeypatch):
     req = request("fresh", "unsafe notification")
     assert middleware._filter_remote_notifications(req).messages[0].content == "unsafe notification"
     assert middleware._filter_remote_notifications(req).messages[0].content == SAFE_TOOL_MESSAGE
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+@pytest.mark.parametrize("content", ["safe note", "unsafe note"])
+def test_notification_cache_handles_unpaired_unicode(monkeypatch, surrogate, content):
+    from types import SimpleNamespace
+
+    from langchain.agents.middleware import ModelRequest
+
+    from silmaril_security.sdk.deepagents import create_deepagents_middleware
+
+    fw, seen = firewall(monkeypatch)
+    middleware = create_deepagents_middleware(fw)
+    note = HumanMessage(id="unicode-note", content=content + surrogate, additional_kwargs={
+        "lc_source": "async_subagent", "lc_data": {"detail": surrogate},
+    })
+    req = ModelRequest(model=Model(responses=[AIMessage("done")]), messages=[note], state={"messages": [note]},
+                       runtime=SimpleNamespace(config={"configurable": {"thread_id": "unicode-thread"}}))
+    for _ in range(2):
+        filtered = middleware._filter_remote_notifications(req)
+        assert filtered.messages[0].content == (SAFE_TOOL_MESSAGE if "unsafe" in content else note.content)
+    assert len([opts for _, opts in seen if opts.get("tool_name") == "async_subagent"]) == 1
