@@ -41,7 +41,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.8.2
+pip install silmaril-security-sdk==0.9.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -889,8 +889,7 @@ IDs must be non-empty; MCP tools also require their canonical server parent ID.
 The compatibility metadata copy remains attribution only. Caller agent metadata
 does not supply an authenticated principal.
 
-Version 0.8.2 is available from [PyPI](https://pypi.org/project/silmaril-security-sdk/0.8.2/)
-and [GitHub Releases](https://github.com/Silmaril-Security/sdk-python/releases/tag/v0.8.2).
-Its published PyPI classifiers list Python 3.10-3.13; current-source qualification
-for Python 3.14/3.15 was added after publication against unchanged runtime code,
-without republishing the 0.8.2 package metadata.
+Published versions are listed on [PyPI](https://pypi.org/project/silmaril-security-sdk/#history)
+and [GitHub Releases](https://github.com/Silmaril-Security/sdk-python/releases).
+Version 0.9.0 includes protected remote Deep Agents support and package classifiers
+for Python 3.10-3.15. The Deep Agents extra requires Python 3.11 or newer.

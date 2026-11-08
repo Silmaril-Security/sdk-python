@@ -1,12 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - Support native remote Deep Agents subagents with parent delegation/result checks
   and independently protected child graphs. Preserve child thread identity, parent
   lineage and async task lifecycle, and inspect background result notifications.
 - Qualify isolated/fork launches, updates, checks, cancellation and failures using
   real framework graphs and SDK transport against a loopback Agent Protocol peer.
+
+- Require Deep Agents 0.7.30 or newer within the 0.7.x line for the qualified
+  remote lifecycle contract. Core and other optional integration floors remain unchanged.
+- Include Python 3.14 and 3.15 package classifiers alongside the existing tested runtimes.
 
 ## 0.8.2
 
