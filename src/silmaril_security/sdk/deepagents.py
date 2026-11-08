@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from threading import RLock
 from typing import Any, NamedTuple
 from uuid import uuid4
 from weakref import WeakValueDictionary, ref
@@ -26,6 +30,7 @@ try:
         ModelResponse,
     )
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langchain_core.runnables.config import ensure_config
     from langgraph.types import Command
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -62,6 +67,7 @@ def _is_protected_graph(runnable: Any, firewall: Firewall | AsyncFirewall) -> bo
 class _Decision(NamedTuple):
     enforce: bool
     mode: FirewallMode | None
+    cacheable: bool = True
 
 
 class SilmarilDeepAgentsMiddleware(AgentMiddleware):
@@ -87,12 +93,29 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         self.fail_open = fail_open
         self.max_blocked_attempts = max_blocked_attempts
         self.on_classify = on_classify
+        self._notification_checks: OrderedDict[tuple[str, str, str, FirewallMode | None], bool] = OrderedDict()
+        self._notification_lock = RLock()
 
     def _metadata(self, request: Any) -> dict[str, Any]:
         metadata: dict[str, Any] = {}
         config = getattr(getattr(request, "runtime", None), "config", None)
+        if not isinstance(config, dict):
+            config = ensure_config()
         if isinstance(config, dict) and config.get("run_id") is not None:
             metadata["langgraph"] = {"run_id": str(config["run_id"])}
+        # Remote task lineage is attribution, never the child's sequence identity.
+        if isinstance(config, dict):
+            native = config.get("metadata")
+            native = native if isinstance(native, dict) else {}
+            configurable = config.get("configurable")
+            parent = configurable.get("deepagents_parent") if isinstance(configurable, dict) else None
+            parent = parent if isinstance(parent, dict) else {}
+            for key, value in {
+                "parent_thread_id": native.get("parent_thread_id") or parent.get("thread_id"),
+                "subagent_name": native.get("subagent_name"),
+            }.items():
+                if isinstance(value, str) and value.strip():
+                    metadata.setdefault("langgraph", {})[key] = value
         metadata.update(conversation_metadata(config))
         return metadata
 
@@ -126,7 +149,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             if not self.fail_open:
                 raise
             logging.getLogger(__name__).warning("Firewall classification failed", exc_info=True)
-            return _Decision(False, self.mode)
+            return _Decision(False, self.mode, False)
         effective_mode = self.mode or result.mode or "block"
         blocked = result.prediction == "MALICIOUS" or result.governance is not None and result.governance.action == "block"
         self._observe(ClassifyEvent(hook, tool_name, text, result, blocked, effective_mode == "shadow", mode=effective_mode))
@@ -148,7 +171,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             if not self.fail_open:
                 raise
             logging.getLogger(__name__).warning("Firewall classification failed", exc_info=True)
-            return _Decision(False, self.mode)
+            return _Decision(False, self.mode, False)
         effective_mode = self.mode or result.mode or "block"
         blocked = result.prediction == "MALICIOUS" or result.governance is not None and result.governance.action == "block"
         await self._aobserve(ClassifyEvent(hook, tool_name, text, result, blocked, effective_mode == "shadow", mode=effective_mode))
@@ -226,7 +249,73 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             response.result = result
         return response
 
+    @staticmethod
+    def _remote_notification(message: Any) -> bool:
+        extra = getattr(message, "additional_kwargs", {})
+        source = extra.get("lc_source")
+        # Markers select extra inspection; they confer no trust or authority.
+        return (isinstance(source, str) and "async_subagent" in source) or isinstance(
+            extra.get("deepagents_notification"), dict
+        )
+
+    def _notification_key(self, request: ModelRequest, message: Any) -> tuple[str, str, str, FirewallMode | None] | None:
+        thread_id = self._metadata(request).get("conversationId")
+        if not thread_id or not isinstance(message.id, str) or not message.id:
+            return None
+        try:
+            payload = json.dumps([message.content, message.additional_kwargs], sort_keys=True)
+        except (TypeError, ValueError):
+            return None
+        return thread_id, message.id, hashlib.sha256(payload.encode("ascii")).hexdigest(), self.mode
+
+    def _cached_notification(self, key: Any) -> bool | None:
+        with self._notification_lock:
+            if key not in self._notification_checks:
+                return None
+            self._notification_checks.move_to_end(key)
+            return self._notification_checks[key]
+
+    def _remember_notification(self, key: Any, decision: _Decision) -> None:
+        if key is None or not decision.cacheable:
+            return
+        with self._notification_lock:
+            self._notification_checks[key] = decision.enforce
+            self._notification_checks.move_to_end(key)
+            while len(self._notification_checks) > 1024:
+                self._notification_checks.popitem(last=False)
+
+    def _filter_remote_notifications(self, request: ModelRequest) -> ModelRequest:
+        messages = []
+        for message in request.messages:
+            if self._remote_notification(message):
+                key = self._notification_key(request, message)
+                blocked = self._cached_notification(key)
+                if blocked is None:
+                    decision = self._classify_decision(message.text, HookLabel.TOOL_RESPONSE, request, "async_subagent")
+                    self._remember_notification(key, decision)
+                    blocked = decision.enforce
+                if blocked:
+                    message = message.model_copy(update={"content": SAFE_TOOL_MESSAGE})
+            messages.append(message)
+        return request.override(messages=messages) if any(a is not b for a, b in zip(messages, request.messages)) else request
+
+    async def _afilter_remote_notifications(self, request: ModelRequest) -> ModelRequest:
+        messages = []
+        for message in request.messages:
+            if self._remote_notification(message):
+                key = self._notification_key(request, message)
+                blocked = self._cached_notification(key)
+                if blocked is None:
+                    decision = await self._aclassify_decision(message.text, HookLabel.TOOL_RESPONSE, request, "async_subagent")
+                    self._remember_notification(key, decision)
+                    blocked = decision.enforce
+                if blocked:
+                    message = message.model_copy(update={"content": SAFE_TOOL_MESSAGE})
+            messages.append(message)
+        return request.override(messages=messages) if any(a is not b for a, b in zip(messages, request.messages)) else request
+
     def wrap_model_call(self, request: ModelRequest, handler: Any) -> Any:
+        request = self._filter_remote_notifications(request)
         input_decision = self._classify_decision(self._input(request), HookLabel.USER_INPUT, request)
         if input_decision.enforce:
             return AIMessage(content=SAFE_OUTPUT_MESSAGE)
@@ -238,6 +327,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         return self._filter_output(handler(request), request)
 
     async def awrap_model_call(self, request: ModelRequest, handler: Any) -> Any:
+        request = await self._afilter_remote_notifications(request)
         input_decision = await self._aclassify_decision(self._input(request), HookLabel.USER_INPUT, request)
         if input_decision.enforce:
             return AIMessage(content=SAFE_OUTPUT_MESSAGE)
@@ -258,6 +348,19 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         )
         _ISSUED_BLOCKED_MESSAGES[id(message)] = message
         return message
+
+    def _blocked_tool_result(self, request: Any, result: Any) -> Any:
+        safe = self._safe_tool_result(request)
+        # Keep native async task bookkeeping even when the returned text is
+        # withheld, so the parent can still check, update or cancel the task.
+        if request.tool_call["name"] in {
+            "start_async_task", "check_async_task", "update_async_task",
+            "cancel_async_task", "list_async_tasks",
+        } and isinstance(result, Command) and isinstance(result.update, dict):
+            tasks = result.update.get("async_tasks")
+            if isinstance(tasks, dict):
+                return Command(update={"messages": [safe], "async_tasks": tasks})
+        return safe
 
     def _allowed_tool_result(self, result: Any) -> Any:
         if isinstance(result, ToolMessage) and result.additional_kwargs.get("silmaril_blocked") == _BLOCKED_TOOL_MARKER:
@@ -285,7 +388,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             return self._safe_tool_result(request)
         result = handler(request)
         if self._classify(str(result.content) if isinstance(result, ToolMessage) else str(result), HookLabel.TOOL_RESPONSE, request, name):
-            return self._safe_tool_result(request)
+            return self._blocked_tool_result(request, result)
         return self._allowed_tool_result(result)
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
@@ -294,7 +397,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             return self._safe_tool_result(request)
         result = await handler(request)
         if await self._aclassify(str(result.content) if isinstance(result, ToolMessage) else str(result), HookLabel.TOOL_RESPONSE, request, name):
-            return self._safe_tool_result(request)
+            return self._blocked_tool_result(request, result)
         return self._allowed_tool_result(result)
 
 
@@ -326,7 +429,11 @@ def create_protected_deep_agent(
     protected_compiled_subagents: Sequence[dict[str, Any]] = (),
     middleware_options: dict[str, Any] | None = None, **kwargs: Any,
 ) -> Any:
-    """Protect root and inline subagents; accept only factory-verified compiled graphs."""
+    """Protect this graph and inline children; support native remote subagent specs.
+
+    Deploy remote children with this same constructor on their own Agent Protocol
+    server. Parent middleware protects delegation/results, not remote internals.
+    """
     try:
         from deepagents import create_deep_agent
         from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
@@ -339,7 +446,12 @@ def create_protected_deep_agent(
     for spec in subagents:
         if "runnable" in spec:
             raise ValueError("Compiled subagents must be protected inside their compiled graph")
-        protected.append({**spec, "middleware": [*(spec.get("middleware") or []), create_deepagents_middleware(firewall, **options)]})
+        if "graph_id" in spec:
+            # AsyncSubAgent runs on its server; an injected local middleware field
+            # would be ignored. The deployed graph installs its own protection.
+            protected.append(dict(spec))
+        else:
+            protected.append({**spec, "middleware": [*(spec.get("middleware") or []), create_deepagents_middleware(firewall, **options)]})
     for spec in protected_compiled_subagents:
         runnable = spec.get("runnable")
         if runnable is None or not _is_protected_graph(runnable, firewall):
