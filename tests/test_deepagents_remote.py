@@ -262,3 +262,69 @@ async def test_concurrent_remote_tasks_keep_distinct_child_identities(monkeypatc
     assert len(out["async_tasks"]) == 2
     assert {opts["metadata"]["conversationId"] for _, opts in child_seen} == set(out["async_tasks"])
     assert all(opts["metadata"]["langgraph"]["parent_thread_id"] == "parent" for _, opts in child_seen)
+
+
+@pytest.mark.asyncio
+async def test_native_notification_is_checked_once_and_stays_withheld_after_resume(monkeypatch, peer):
+    attach_child(monkeypatch, peer, [AIMessage(content="safe child answer")])
+    peer["tamper"] = True
+    captured = []
+
+    class RecordingModel(Model):
+        def _generate(self, messages, *args, **kwargs):
+            captured.extend(message.content for message in messages)
+            return super()._generate(messages, *args, **kwargs)
+
+    fw, seen = firewall(monkeypatch)
+    agent = create_protected_deep_agent(fw, model=RecordingModel(responses=[
+        call("start_async_task", {"description": "safe", "subagent_type": "research"}),
+        AIMessage(content="done"), AIMessage(content="done again"),
+    ]), subagents=[{"name": "research", "description": "Remote", "graph_id": "research",
+                   "url": peer["url"], "notify_parent": True}], checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "parent-resume"}}
+    first = await agent.ainvoke({"messages": [HumanMessage("hello")]}, config)
+    # Assert the real upstream graph produced a marked notification, not just a test message.
+    assert any("unsafe remote result" in message.text and (
+        message.additional_kwargs.get("lc_source") == "async_subagent"
+        or "deepagents_notification" in message.additional_kwargs
+    ) for message in first["messages"])
+    await agent.ainvoke({"messages": [HumanMessage("safe newer question")]}, config)
+    assert "unsafe remote result" not in json.dumps(captured)
+    checks = [text for text, opts in seen if opts["hook"] == HookLabel.TOOL_RESPONSE
+              and opts.get("tool_name") == "async_subagent" and "unsafe remote result" in text]
+    assert len(checks) == 1
+
+
+def test_notification_cache_is_bound_to_thread_content_and_success(monkeypatch):
+    from types import SimpleNamespace
+
+    from langchain.agents.middleware import ModelRequest
+
+    from silmaril_security.sdk.deepagents import create_deepagents_middleware
+
+    fw, seen = firewall(monkeypatch)
+    middleware = create_deepagents_middleware(fw)
+
+    def request(thread, content):
+        messages = [HumanMessage(id="note", content=content, additional_kwargs={"lc_source": "async_subagent"}), HumanMessage("safe")]
+        return ModelRequest(model=Model(responses=[AIMessage("done")]), messages=messages, state={"messages": messages},
+                            runtime=SimpleNamespace(config={"configurable": {"thread_id": thread}}))
+
+    for thread, content in [("one", "safe note"), ("one", "safe note"), ("two", "safe note"), ("one", "unsafe changed note")]:
+        middleware.wrap_model_call(request(thread, content), lambda _: AIMessage("done"))
+    assert len([opts for _, opts in seen if opts.get("tool_name") == "async_subagent"]) == 3
+
+    raw = fw._classify_raw
+    failed = False
+
+    def transient(text, **kwargs):
+        nonlocal failed
+        if kwargs.get("tool_name") == "async_subagent" and not failed:
+            failed = True
+            raise ConnectionError("temporary")
+        return raw(text, **kwargs)
+
+    monkeypatch.setattr(fw, "_classify_raw", transient)
+    req = request("fresh", "unsafe notification")
+    assert middleware._filter_remote_notifications(req).messages[0].content == "unsafe notification"
+    assert middleware._filter_remote_notifications(req).messages[0].content == SAFE_TOOL_MESSAGE

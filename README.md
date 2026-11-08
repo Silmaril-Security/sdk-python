@@ -84,7 +84,7 @@ pip install "silmaril-security-sdk[langchain]"
 ```
 
 Optional Deep Agents support. On Python 3.11 or later that extra installs
-`deepagents>=0.7.21,<0.8` and `httpx>=0.25.0`. The supported runtime
+`deepagents>=0.7.30,<0.8` and `httpx>=0.25.0`. The supported runtime
 range is Python 3.11 through 3.15. On Python 3.10 the environment marker skips
 the `deepagents` package.
 
@@ -793,6 +793,10 @@ The native `start_async_task`, `check_async_task`, `update_async_task`,
 tracked `async_tasks` state. Parent middleware checks delegation before launch,
 returned tool results and background task notifications before model use.
 Blocked result text is withheld while native task bookkeeping remains available.
+Successful notification checks are reused for unchanged native message IDs within
+a thread using a bounded middleware-local cache. Blocked replacements are applied
+again after checkpoint resume. A new graph/process rechecks retained notifications;
+failed classifications are retried.
 Shadow/Warn preserve content; classification failure behavior follows `fail_open`.
 
 The child uses its own native `thread_id` as `metadata.conversationId`.
@@ -854,7 +858,7 @@ python -m twine check dist/*
 ```
 
 Additional CI jobs exercise the minimum `langchain-core==0.2.0` on Python
-3.10 and `deepagents==0.7.21` on Python 3.11. CI explicitly imports configured
+3.10 and `deepagents==0.7.30` on Python 3.11. CI explicitly imports configured
 integrations before tests. CI/release verify the built wheel outside the source
 checkout with `scripts/verify_thread_package.py`.
 

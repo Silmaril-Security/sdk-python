@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from threading import RLock
 from typing import Any, NamedTuple
 from uuid import uuid4
 from weakref import WeakValueDictionary, ref
@@ -63,6 +67,7 @@ def _is_protected_graph(runnable: Any, firewall: Firewall | AsyncFirewall) -> bo
 class _Decision(NamedTuple):
     enforce: bool
     mode: FirewallMode | None
+    cacheable: bool = True
 
 
 class SilmarilDeepAgentsMiddleware(AgentMiddleware):
@@ -88,6 +93,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         self.fail_open = fail_open
         self.max_blocked_attempts = max_blocked_attempts
         self.on_classify = on_classify
+        self._notification_checks: OrderedDict[tuple[str, str, str, FirewallMode | None], bool] = OrderedDict()
+        self._notification_lock = RLock()
 
     def _metadata(self, request: Any) -> dict[str, Any]:
         metadata: dict[str, Any] = {}
@@ -142,7 +149,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             if not self.fail_open:
                 raise
             logging.getLogger(__name__).warning("Firewall classification failed", exc_info=True)
-            return _Decision(False, self.mode)
+            return _Decision(False, self.mode, False)
         effective_mode = self.mode or result.mode or "block"
         blocked = result.prediction == "MALICIOUS" or result.governance is not None and result.governance.action == "block"
         self._observe(ClassifyEvent(hook, tool_name, text, result, blocked, effective_mode == "shadow", mode=effective_mode))
@@ -164,7 +171,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             if not self.fail_open:
                 raise
             logging.getLogger(__name__).warning("Firewall classification failed", exc_info=True)
-            return _Decision(False, self.mode)
+            return _Decision(False, self.mode, False)
         effective_mode = self.mode or result.mode or "block"
         blocked = result.prediction == "MALICIOUS" or result.governance is not None and result.governance.action == "block"
         await self._aobserve(ClassifyEvent(hook, tool_name, text, result, blocked, effective_mode == "shadow", mode=effective_mode))
@@ -251,23 +258,59 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             extra.get("deepagents_notification"), dict
         )
 
+    def _notification_key(self, request: ModelRequest, message: Any) -> tuple[str, str, str, FirewallMode | None] | None:
+        thread_id = self._metadata(request).get("conversationId")
+        if not thread_id or not isinstance(message.id, str) or not message.id:
+            return None
+        try:
+            payload = json.dumps([message.content, message.additional_kwargs], sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return None
+        return thread_id, message.id, hashlib.sha256(payload.encode()).hexdigest(), self.mode
+
+    def _cached_notification(self, key: Any) -> bool | None:
+        with self._notification_lock:
+            if key not in self._notification_checks:
+                return None
+            self._notification_checks.move_to_end(key)
+            return self._notification_checks[key]
+
+    def _remember_notification(self, key: Any, decision: _Decision) -> None:
+        if key is None or not decision.cacheable:
+            return
+        with self._notification_lock:
+            self._notification_checks[key] = decision.enforce
+            self._notification_checks.move_to_end(key)
+            while len(self._notification_checks) > 1024:
+                self._notification_checks.popitem(last=False)
+
     def _filter_remote_notifications(self, request: ModelRequest) -> ModelRequest:
         messages = []
         for message in request.messages:
-            if self._remote_notification(message) and self._classify(
-                message.text, HookLabel.TOOL_RESPONSE, request, "async_subagent"
-            ):
-                message = message.model_copy(update={"content": SAFE_TOOL_MESSAGE})
+            if self._remote_notification(message):
+                key = self._notification_key(request, message)
+                blocked = self._cached_notification(key)
+                if blocked is None:
+                    decision = self._classify_decision(message.text, HookLabel.TOOL_RESPONSE, request, "async_subagent")
+                    self._remember_notification(key, decision)
+                    blocked = decision.enforce
+                if blocked:
+                    message = message.model_copy(update={"content": SAFE_TOOL_MESSAGE})
             messages.append(message)
         return request.override(messages=messages) if any(a is not b for a, b in zip(messages, request.messages)) else request
 
     async def _afilter_remote_notifications(self, request: ModelRequest) -> ModelRequest:
         messages = []
         for message in request.messages:
-            if self._remote_notification(message) and await self._aclassify(
-                message.text, HookLabel.TOOL_RESPONSE, request, "async_subagent"
-            ):
-                message = message.model_copy(update={"content": SAFE_TOOL_MESSAGE})
+            if self._remote_notification(message):
+                key = self._notification_key(request, message)
+                blocked = self._cached_notification(key)
+                if blocked is None:
+                    decision = await self._aclassify_decision(message.text, HookLabel.TOOL_RESPONSE, request, "async_subagent")
+                    self._remember_notification(key, decision)
+                    blocked = decision.enforce
+                if blocked:
+                    message = message.model_copy(update={"content": SAFE_TOOL_MESSAGE})
             messages.append(message)
         return request.override(messages=messages) if any(a is not b for a, b in zip(messages, request.messages)) else request
 
