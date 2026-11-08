@@ -817,6 +817,8 @@ IDs must be non-empty; MCP tools also require their canonical server parent ID.
 The compatibility metadata copy remains attribution only. Caller agent metadata
 does not supply an authenticated principal.
 
-This source prepares version 0.8.2. Its registry install command becomes
-available after the authorized main-branch release workflow publishes the package.
-Confirm registry publication before installing this version.
+Version 0.8.2 is available from [PyPI](https://pypi.org/project/silmaril-security-sdk/0.8.2/)
+and [GitHub Releases](https://github.com/Silmaril-Security/sdk-python/releases/tag/v0.8.2).
+Its published PyPI classifiers list Python 3.10-3.13; current-source qualification
+for Python 3.14/3.15 was added after publication against unchanged runtime code,
+without republishing the 0.8.2 package metadata.
