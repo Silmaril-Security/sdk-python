@@ -739,6 +739,74 @@ Classification errors allow model and tool execution by default; set
 classification. The middleware classifies with `governance=None`. A governance
 `"block"` on the response is still enforced in Block mode.
 
+### Remote subagents
+
+Remote support requires `deepagents>=0.7.30,<0.8` on Python 3.11 or newer.
+Use `create_protected_deep_agent` in **both services**. The remote Agent Protocol
+service owns the child graph, model, tools and Firewall client.
+
+In the **remote service** (`remote_child.py`):
+
+```python
+import os
+from silmaril_security.sdk import AsyncFirewall
+from silmaril_security.sdk.deepagents import create_protected_deep_agent
+
+child_firewall = AsyncFirewall(
+    api_key=os.environ["SILMARIL_API_KEY"],
+    api_url=os.environ["SILMARIL_API_URL"],
+)
+graph = create_protected_deep_agent(
+    child_firewall, model=os.environ["CHILD_MODEL"],
+    middleware_options={"mode": "block", "fail_open": False},
+)
+```
+
+Register `graph` as `research` in that service's Agent Protocol configuration.
+The child applies input, tool-call, tool-result and non-streamed output checks
+inside its own execution. Configure its tools and any additional local subagents
+through the same protected constructor.
+
+In the **parent application**:
+
+```python
+parent = create_protected_deep_agent(
+    parent_firewall,
+    model=parent_model,
+    subagents=[{
+        "name": "research", "description": "Background research",
+        "graph_id": "research", "url": "https://research.example.com",
+        "mode": "isolated",  # or "fork" to include parent conversation context
+        "notify_parent": False,
+        "update_strategy": "enqueue",
+    }],
+    middleware_options={"mode": "block", "fail_open": False},
+)
+result = await parent.ainvoke(
+    {"messages": [{"role": "user", "content": "Research this topic"}]},
+    {"configurable": {"thread_id": "parent-conversation"}},
+)
+```
+
+The native `start_async_task`, `check_async_task`, `update_async_task`,
+`cancel_async_task` and `list_async_tasks` tools retain upstream behavior and
+tracked `async_tasks` state. Parent middleware checks delegation before launch,
+returned tool results and background task notifications before model use.
+Blocked result text is withheld while native task bookkeeping remains available.
+Shadow/Warn preserve content; classification failure behavior follows `fail_open`.
+
+The child uses its own native `thread_id` as `metadata.conversationId`.
+Available `parent_thread_id` and `subagent_name` are recorded under `metadata.langgraph`
+for attribution; they do not establish authorization or replace child identity.
+Native `headers` authenticate to the remote Agent Protocol service; each deployed
+service configures its Silmaril client separately. Fork mode shares conversation
+context; deploy the child with its own protection in either mode. The parent
+cannot install middleware into another server or attest its deployment.
+Use `notify_parent=False` for another deployment and check results through native
+lifecycle tools. Webhook-delivered results consumed by your application require
+an application-side classification boundary. Streaming output retains the
+limitations described above.
+
 ## Governance
 
 Pass `GovernanceContext` as `governance=` to `classify()`, or one context per

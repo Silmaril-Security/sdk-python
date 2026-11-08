@@ -99,7 +99,7 @@ jobs:
             extras: "langchain"
           - profile: deepagents
             python: "3.11"
-            dependency: "deepagents==0.7.21"
+            dependency: "deepagents==0.7.30"
             extras: "langchain,deepagents"
     steps:
       - uses: actions/checkout@v4
@@ -112,3 +112,7 @@ jobs:
         run: python -c "import ${{ matrix.profile == 'langchain' && 'langchain_core' || 'deepagents' }}"
       - name: Exercise native thread integration
         run: python -m pytest tests/test_langchain.py tests/test_thread_identity.py -q
+
+      - name: Test Deep Agents remote protocol minimum
+        if: matrix.profile == 'deepagents'
+        run: python -m pytest tests/test_deepagents.py tests/test_deepagents_remote.py -q

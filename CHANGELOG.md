@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Support native remote Deep Agents subagents with parent delegation/result checks
+  and independently protected child graphs. Preserve child thread identity, parent
+  lineage and async task lifecycle, and inspect background result notifications.
+- Qualify isolated/fork launches, updates, checks, cancellation and failures using
+  real framework graphs and SDK transport against a loopback Agent Protocol peer.
+
 ## 0.8.2
 
 - Reject zero and non-finite synchronous request timeouts when constructing the

@@ -49,7 +49,7 @@ langchain = [
 ]
 deepagents = [
     "httpx>=0.25.0",
-    "deepagents>=0.7.21,<0.8; python_version >= '3.11'",
+    "deepagents>=0.7.30,<0.8; python_version >= '3.11'",
 ]
 dev = [
     "build>=1.2.0",
