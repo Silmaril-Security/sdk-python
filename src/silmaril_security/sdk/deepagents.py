@@ -8,7 +8,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from threading import RLock
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary, ref
 
@@ -406,22 +406,80 @@ def create_deepagents_middleware(firewall: Firewall | AsyncFirewall, **kwargs: A
     return SilmarilDeepAgentsMiddleware(firewall, **kwargs)
 
 
+def _with_protection(
+    middleware: Sequence[Any],
+    firewall: Firewall | AsyncFirewall,
+    options: dict[str, Any],
+) -> list[Any]:
+    """Append one Silmaril boundary or retain an equivalent existing one."""
+    result = list(middleware)
+    existing = [
+        entry for entry in result if isinstance(entry, SilmarilDeepAgentsMiddleware)
+    ]
+    if any(entry.firewall is not firewall for entry in existing):
+        raise ValueError(
+            "A Deep Agents middleware stack cannot use multiple Firewall clients"
+        )
+    if len(existing) > 1:
+        raise ValueError(
+            "A Deep Agents middleware stack must contain exactly one Silmaril "
+            "boundary; remove duplicate SilmarilDeepAgentsMiddleware entries"
+        )
+
+    requested = create_deepagents_middleware(firewall, **options)
+    if existing:
+        current = existing[0]
+        conflicts = [
+            attribute
+            for attribute in ("mode", "fail_open", "max_blocked_attempts")
+            if getattr(current, attribute) != getattr(requested, attribute)
+        ]
+        if current.on_classify is not requested.on_classify:
+            conflicts.append("on_classify")
+        if conflicts:
+            raise ValueError(
+                "Existing SilmarilDeepAgentsMiddleware conflicts with requested "
+                f"middleware_options for: {', '.join(conflicts)}"
+            )
+        return result
+
+    result.append(requested)
+    return result
+
+
+def _validate_compiled_mode(spec: dict[str, Any]) -> None:
+    mode = spec.get("mode")
+    if "mode" in spec and mode not in ("isolated", "fork"):
+        raise ValueError(
+            f"Compiled subagent {spec.get('name')!r} has invalid mode {mode!r}; "
+            "expected 'isolated' or 'fork'"
+        )
+
+
 def create_protected_compiled_subagent(
     firewall: Firewall | AsyncFirewall, *, name: str, description: str,
     model: Any, tools: Sequence[Any] = (), middleware: Sequence[Any] = (),
-    middleware_options: dict[str, Any] | None = None, **agent_kwargs: Any,
+    middleware_options: dict[str, Any] | None = None,
+    mode: Literal["isolated", "fork"] | None = None,
+    **agent_kwargs: Any,
 ) -> dict[str, Any]:
     """Compile a subagent with Silmaril installed and register its graph identity."""
     from langchain.agents import create_agent
 
     reject_conversation_options(agent_kwargs)
+    if mode not in (None, "isolated", "fork"):
+        raise ValueError("mode must be 'isolated', 'fork', or None")
+    options = middleware_options or {}
     runnable = create_agent(
         model=model, tools=list(tools),
-        middleware=[*middleware, create_deepagents_middleware(firewall, **(middleware_options or {}))],
+        middleware=_with_protection(middleware, firewall, options),
         **agent_kwargs,
     )
     _register_protected_graph(runnable, firewall)
-    return {"name": name, "description": description, "runnable": runnable}
+    spec = {"name": name, "description": description, "runnable": runnable}
+    if mode is not None:
+        spec["mode"] = mode
+    return spec
 
 
 def create_protected_deep_agent(
@@ -436,12 +494,19 @@ def create_protected_deep_agent(
     """
     try:
         from deepagents import create_deep_agent
-        from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
     except ImportError as exc:  # pragma: no cover
         raise ImportError('Install "silmaril-security-sdk[deepagents]"') from exc
+    from silmaril_security.sdk._deepagents_compat import (
+        protected_default_subagent,
+        resolve_model_and_profile,
+    )
+
     reject_conversation_options(kwargs)
     options = middleware_options or {}
-    root = create_deepagents_middleware(firewall, **options)
+    supplied_root_middleware = list(kwargs.pop("middleware", ()) or ())
+    root_middleware = _with_protection(
+        supplied_root_middleware, firewall, options
+    )
     protected: list[dict[str, Any]] = []
     for spec in subagents:
         if "runnable" in spec:
@@ -451,7 +516,12 @@ def create_protected_deep_agent(
             # would be ignored. The deployed graph installs its own protection.
             protected.append(dict(spec))
         else:
-            protected.append({**spec, "middleware": [*(spec.get("middleware") or []), create_deepagents_middleware(firewall, **options)]})
+            protected.append({
+                **spec,
+                "middleware": _with_protection(
+                    spec.get("middleware") or (), firewall, options
+                ),
+            })
     for spec in protected_compiled_subagents:
         runnable = spec.get("runnable")
         if runnable is None or not _is_protected_graph(runnable, firewall):
@@ -459,9 +529,30 @@ def create_protected_deep_agent(
                 "Compiled subagents must be built with create_protected_compiled_subagent "
                 "for this Firewall client"
             )
+        _validate_compiled_mode(spec)
         protected.append(dict(spec))
-    if not any(spec.get("name") == "general-purpose" for spec in protected):
-        protected.insert(0, {**GENERAL_PURPOSE_SUBAGENT, "middleware": [create_deepagents_middleware(firewall, **options)]})
+
+    parent_model, profile = resolve_model_and_profile(kwargs.pop("model", None))
+    default = protected_default_subagent(
+        profile,
+        create_deepagents_middleware(firewall, **options),
+        has_explicit_default=any(
+            "graph_id" not in spec and spec.get("name") == "general-purpose"
+            for spec in protected
+        ),
+        root_middleware=[
+            entry
+            for entry in supplied_root_middleware
+            if not isinstance(entry, SilmarilDeepAgentsMiddleware)
+        ],
+        tools=kwargs.get("tools"),
+        skills=kwargs.get("skills"),
+    )
+    if default is not None:
+        protected.insert(0, default)
     return create_deep_agent(
-        subagents=protected, middleware=[*(kwargs.pop("middleware", ()) or ()), root], **kwargs
+        model=parent_model,
+        subagents=cast(Any, protected),
+        middleware=root_middleware,
+        **kwargs,
     )

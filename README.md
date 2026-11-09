@@ -41,7 +41,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.9.0
+pip install silmaril-security-sdk==0.9.1
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -77,16 +77,19 @@ The distribution name is `silmaril-security-sdk`. The SDK import path is
 `silmaril_security.sdk`, so call sites use `Firewall`, `HookLabel`, and
 `FirewallBlockedException` from that package.
 
-Optional LangChain support. That extra installs `langchain-core>=0.2.0` and `httpx>=0.25.0`:
+Optional LangChain support. That extra installs the safe retained ranges
+`langchain-core>=0.3.85,<1` or `langchain-core>=1.3.3,<2` and
+`httpx>=0.25.0`. Package metadata expresses that union as
+`>=0.3.85,<2,!=1.0.*,!=1.1.*,!=1.2.*,!=1.3.0,!=1.3.1,!=1.3.2`:
 
 ```sh
 pip install "silmaril-security-sdk[langchain]"
 ```
 
 Optional Deep Agents support. On Python 3.11 or later that extra installs
-`deepagents>=0.7.30,<0.8` and `httpx>=0.25.0`. The supported runtime
-range is Python 3.11 through 3.15. On Python 3.10 the environment marker skips
-the `deepagents` package.
+`deepagents>=0.7.30,<0.8`, `langchain-core>=1.3.3,<2`, and `httpx>=0.25.0`.
+The supported runtime range is Python 3.11 through 3.15. On Python 3.10 the
+environment marker skips the `deepagents` package.
 
 ```sh
 pip install "silmaril-security-sdk[deepagents]"
@@ -713,14 +716,36 @@ that inherit their parent thread. Separately executed graphs retain their own
 native IDs. No thread ID means no conversation identity.
 
 The constructor installs checks on the root, general-purpose, and declarative
-subagents. Create a compiled subagent with
+subagents. The released Deep Agents 0.7.x profile fields `enabled`,
+`description`, and `system_prompt` control the protected auto-added
+general-purpose subagent. `enabled=False` creates no replacement; an explicit
+named child remains explicit. Parent tools and skills are forwarded to that
+protected default before Deep Agents applies profile tool overrides and
+exclusions. String model specs are left for Deep Agents to construct exactly
+once; runtime-registered string-only profiles that cannot be recovered from the
+resolved model may customize only the released general-purpose fields above.
+Root-level prompt, tool, or middleware settings on such a profile fail with a
+compatibility error rather than silently changing the child. The released API
+has no profile rename field.
+
+Two other released-API combinations also fail explicitly because an exact
+protected representation is unavailable: a profile that combines
+`base_system_prompt` with a general-purpose `system_prompt`, and a profile
+middleware factory combined with custom root middleware. Existing Silmaril
+middleware is reused only when its Firewall and `mode`, `fail_open`,
+`max_blocked_attempts`, and `on_classify` settings exactly match the requested
+factory options; duplicate, foreign, or conflicting boundaries are rejected.
+
+Create a compiled subagent with
 `create_protected_compiled_subagent(fw, name="review", description="Review",
-model=model, tools=tools)` and pass its returned spec through
+model=model, tools=tools, mode="isolated")` and pass its returned spec through
 `protected_compiled_subagents`. That factory installs middleware before
 compilation. The parent constructor verifies the exact graph and Firewall
-client; it rejects arbitrary compiled runnables. Root custom middleware is not
-automatically inherited by every subagent. Use `AsyncFirewall` with async
-graph execution; `Firewall` supports sync and async graph execution.
+client; it rejects arbitrary compiled runnables. `mode` may be `"isolated"` or
+`"fork"` and is omitted when unset; fork mode remains beta in Deep Agents.
+Root custom middleware is not automatically inherited by every subagent. Use
+`AsyncFirewall` with async graph execution; `Firewall` supports sync and async
+graph execution.
 
 The middleware checks user input before model use, tool calls before execution,
 tool results before the next model call, and model output returned from
@@ -857,15 +882,24 @@ python -m build
 python -m twine check dist/*
 ```
 
-Additional CI jobs exercise the minimum `langchain-core==0.2.0` on Python
-3.10 and `deepagents==0.7.30` on Python 3.11. CI explicitly imports configured
-integrations before tests. CI/release verify the built wheel outside the source
-checkout with `scripts/verify_thread_package.py`.
+Additional CI jobs exercise both standalone safe boundaries:
+`langchain-core==0.3.85` with `langgraph==0.6.11`, and
+`langchain-core==1.3.3` with `langgraph==1.0.2`, on Python 3.10. The coherent
+Deep Agents minimum tuple (`deepagents==0.7.30`, `langchain==1.4.6`,
+`langchain-core==1.6.12`, `langgraph==1.2.12`) runs on Python 3.11. Current
+lanes pin the qualified Deep Agents 0.7.34, LangChain 1.4.9, core 1.7.6, and
+LangGraph 1.2.20 tuple. Every lane runs `pip check`; CI explicitly imports
+configured integrations before tests. CI/release verify the built wheel
+outside the source checkout with `scripts/verify_thread_package.py`. The 0.3
+lane builds and installs its wheel but leaves Twine validation to the 1.x and
+current lanes because core 0.3.85 requires `packaging<26` while Twine 7
+requires `packaging>=26.1`.
 
-The release workflow uses Python 3.12 and the Deep Agents install above. It
-runs `ruff check src tests`, then `python -m pytest -q -m "not integration"`,
-then `python -m build` and `python -m twine check dist/*`. Local setup and the
-live-endpoint rule are in [CONTRIBUTING.md](CONTRIBUTING.md).
+The release workflow uses Python 3.12 and the qualified current framework tuple
+above. It runs `pip check`, `ruff check src tests`, then
+`python -m pytest -q -m "not integration"`, followed by `python -m build` and
+`python -m twine check dist/*`. Local setup and the live-endpoint rule are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Publishing
 
@@ -891,5 +925,7 @@ does not supply an authenticated principal.
 
 Published versions are listed on [PyPI](https://pypi.org/project/silmaril-security-sdk/#history)
 and [GitHub Releases](https://github.com/Silmaril-Security/sdk-python/releases).
-Version 0.9.0 includes protected remote Deep Agents support and package classifiers
-for Python 3.10-3.15. The Deep Agents extra requires Python 3.11 or newer.
+Version 0.9.1 retains the safe LangChain 0.3.85 and 1.3.3+ ranges while
+excluding affected 1.0–1.2 and early 1.3 releases, and preserves released Deep
+Agents profile and compiled-mode semantics. The Deep Agents extra requires
+Python 3.11 or newer.

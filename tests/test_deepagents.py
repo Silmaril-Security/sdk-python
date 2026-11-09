@@ -317,9 +317,14 @@ def test_compiled_subagent_requires_protected_runnable():
 
 def test_constructor_covers_root_general_and_declarative(monkeypatch):
     import deepagents
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     captured = {}
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
 
     def make(**kwargs):
         captured.update(kwargs)
@@ -328,12 +333,690 @@ def test_constructor_covers_root_general_and_declarative(monkeypatch):
     monkeypatch.setattr(deepagents, "create_deep_agent", make)
     create_protected_deep_agent(
         fw, subagents=[{"name": "research", "description": "research"}],
-        model="test-model",
+        model=Model(responses=[AIMessage("ok")]),
     )
     assert isinstance(captured["middleware"][-1], type(create_deepagents_middleware(fw)))
     specs = {spec["name"]: spec for spec in captured["subagents"]}
     assert specs["general-purpose"]["middleware"]
     assert specs["research"]["middleware"]
+    assert all(
+        len([entry for entry in spec.get("middleware", []) if hasattr(entry, "firewall")]) == 1
+        for spec in specs.values()
+    )
+
+
+def test_profile_disabled_default_is_not_replaced(monkeypatch):
+    import deepagents
+    from deepagents import GeneralPurposeSubagentProfile, HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    profile = HarnessProfile(
+        general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)
+    )
+    monkeypatch.setattr(
+        harness_profiles, "_harness_profile_for_model", lambda model, spec: profile
+    )
+    captured = {}
+    monkeypatch.setattr(
+        deepagents, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or kwargs
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    create_protected_deep_agent(fw, model=Model(responses=[AIMessage("ok")]))
+    assert captured["subagents"] == []
+
+
+def test_disabled_profile_omits_upstream_task_middleware(monkeypatch):
+    import deepagents.graph
+    from deepagents import GeneralPurposeSubagentProfile, HarnessProfile
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    profile = HarnessProfile(
+        general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)
+    )
+
+    def resolver(model, spec):
+        return profile
+
+    monkeypatch.setattr(harness_profiles, "_harness_profile_for_model", resolver)
+    monkeypatch.setattr(deepagents.graph, "_harness_profile_for_model", resolver)
+    captured = {}
+    monkeypatch.setattr(
+        deepagents.graph,
+        "create_agent",
+        lambda *args, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(with_config=lambda config: None),
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    create_protected_deep_agent(fw, model=Model(responses=[AIMessage("ok")]))
+    assert not any(
+        isinstance(entry, SubAgentMiddleware) for entry in captured["middleware"]
+    )
+
+
+def test_profile_customized_default_keeps_one_protected_boundary(monkeypatch):
+    import deepagents
+    from deepagents import GeneralPurposeSubagentProfile, HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    profile = HarnessProfile(
+        system_prompt_suffix="Profile suffix",
+        general_purpose_subagent=GeneralPurposeSubagentProfile(
+            description="Profile description",
+            system_prompt="Profile prompt",
+        ),
+    )
+    monkeypatch.setattr(
+        harness_profiles, "_harness_profile_for_model", lambda model, spec: profile
+    )
+    captured = {}
+    monkeypatch.setattr(
+        deepagents, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or kwargs
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    model = Model(responses=[AIMessage("ok")])
+    create_protected_deep_agent(fw, model=model)
+    assert captured["model"] is model
+    assert len(captured["subagents"]) == 1
+    spec = captured["subagents"][0]
+    assert spec["name"] == "general-purpose"
+    assert spec["description"] == "Profile description"
+    assert spec["system_prompt"] == "Profile prompt"
+    assert len(spec["middleware"]) == 1
+    assert spec["middleware"][0].firewall is fw
+
+
+def test_upstream_applies_custom_profile_prompt_and_middleware_once(monkeypatch):
+    import deepagents.graph
+    from deepagents import GeneralPurposeSubagentProfile, HarnessProfile
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from deepagents.middleware.skills import SkillsMiddleware
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from deepagents.profiles.harness import harness_profiles
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.tools import tool
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    class ProfileMiddleware(AgentMiddleware):
+        pass
+
+    @tool
+    def parent_tool(query: str) -> str:
+        """Return a deterministic parent tool result."""
+        return query
+
+    @tool
+    def excluded_tool(query: str) -> str:
+        """A tool removed by the active profile."""
+        return query
+
+    marker = ProfileMiddleware()
+    root_filesystem = FilesystemMiddleware(backend=StateBackend())
+    skill_sources = ["/skills/project/"]
+    profile = HarnessProfile(
+        system_prompt_suffix="Profile suffix",
+        tool_description_overrides={"parent_tool": "Profile tool description"},
+        excluded_tools=frozenset({"excluded_tool"}),
+        extra_middleware=(marker,),
+        general_purpose_subagent=GeneralPurposeSubagentProfile(
+            description="Profile description",
+            system_prompt="Profile prompt",
+        ),
+    )
+
+    def resolver(model, spec):
+        return profile
+
+    monkeypatch.setattr(harness_profiles, "_harness_profile_for_model", resolver)
+    monkeypatch.setattr(deepagents.graph, "_harness_profile_for_model", resolver)
+    captured = {}
+    monkeypatch.setattr(
+        deepagents.graph,
+        "create_agent",
+        lambda *args, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(with_config=lambda config: None),
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    create_protected_deep_agent(
+        fw,
+        model=Model(responses=[AIMessage("ok")]),
+        tools=[parent_tool, excluded_tool],
+        skills=skill_sources,
+        middleware=[root_filesystem],
+    )
+    task = next(
+        entry
+        for entry in captured["middleware"]
+        if isinstance(entry, SubAgentMiddleware)
+    )
+    default = task._subagents[0]
+    assert default["description"] == "Profile description"
+    assert default["system_prompt"] == "Profile prompt\n\nProfile suffix"
+    assert [entry.name for entry in default["tools"]] == [
+        "parent_tool",
+        "excluded_tool",
+    ]
+    assert default["tools"][0].description == "Profile tool description"
+    assert root_filesystem in default["middleware"]
+    assert default["middleware"].count(marker) == 1
+    skill_middleware = [
+        entry
+        for entry in default["middleware"]
+        if isinstance(entry, SkillsMiddleware)
+    ]
+    assert len(skill_middleware) == 1
+    assert skill_middleware[0].sources == skill_sources
+    assert (
+        len([
+            entry
+            for entry in default["middleware"]
+            if entry.__class__.__name__ == "_ToolExclusionMiddleware"
+        ])
+        == 1
+    )
+    assert (
+        len([
+            entry
+            for entry in default["middleware"]
+            if getattr(entry, "firewall", None) is fw
+        ])
+        == 1
+    )
+
+
+def test_auto_default_retains_root_override_middleware_intent(monkeypatch):
+    import deepagents
+    from deepagents import HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    class FilesystemMiddleware(AgentMiddleware):
+        pass
+
+    override = FilesystemMiddleware()
+    monkeypatch.setattr(
+        harness_profiles, "_harness_profile_for_model", lambda model, spec: HarnessProfile()
+    )
+    captured = {}
+    monkeypatch.setattr(
+        deepagents, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or kwargs
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    create_protected_deep_agent(
+        fw,
+        model=Model(responses=[AIMessage("ok")]),
+        middleware=[override],
+    )
+    default_middleware = captured["subagents"][0]["middleware"]
+    assert default_middleware[0] is override
+    assert len([entry for entry in default_middleware if entry is override]) == 1
+    assert default_middleware[-1].firewall is fw
+
+
+def test_existing_protection_is_not_duplicated_and_conflicts_are_rejected(monkeypatch):
+    import deepagents
+    from deepagents import HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    monkeypatch.setattr(
+        harness_profiles, "_harness_profile_for_model", lambda model, spec: HarnessProfile()
+    )
+    captured = {}
+    monkeypatch.setattr(
+        deepagents, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or kwargs
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    existing = create_deepagents_middleware(fw)
+    create_protected_deep_agent(
+        fw,
+        model=Model(responses=[AIMessage("ok")]),
+        middleware=[existing],
+    )
+    assert captured["middleware"] == [existing]
+
+    other = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.raises(ValueError, match="multiple Firewall clients"):
+        create_protected_deep_agent(
+            fw,
+            model=Model(responses=[AIMessage("ok")]),
+            middleware=[create_deepagents_middleware(other)],
+        )
+
+
+def test_existing_protection_requires_exact_options_and_preserves_order(monkeypatch):
+    import deepagents
+    from deepagents import HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    class BeforeMiddleware(AgentMiddleware):
+        pass
+
+    class AfterMiddleware(AgentMiddleware):
+        pass
+
+    monkeypatch.setattr(
+        harness_profiles, "_harness_profile_for_model", lambda model, spec: HarnessProfile()
+    )
+    captured = {}
+    monkeypatch.setattr(
+        deepagents, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or kwargs
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+
+    def callback(event):
+        return None
+
+    options = {
+        "mode": "warn",
+        "fail_open": False,
+        "max_blocked_attempts": 5,
+        "on_classify": callback,
+    }
+    before = BeforeMiddleware()
+    existing = create_deepagents_middleware(fw, **options)
+    after = AfterMiddleware()
+    create_protected_deep_agent(
+        fw,
+        model=Model(responses=[AIMessage("ok")]),
+        middleware=[before, existing, after],
+        middleware_options=options,
+    )
+    assert captured["middleware"] == [before, existing, after]
+
+    with pytest.raises(ValueError, match="mode, fail_open, max_blocked_attempts, on_classify"):
+        create_protected_deep_agent(
+            fw,
+            model=Model(responses=[AIMessage("ok")]),
+            middleware=[existing],
+        )
+
+
+def test_existing_protection_rejects_duplicate_boundaries_before_construction(monkeypatch):
+    import deepagents
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    monkeypatch.setattr(
+        deepagents,
+        "create_deep_agent",
+        lambda **kwargs: pytest.fail("duplicate boundaries must fail before construction"),
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.raises(ValueError, match="duplicate SilmarilDeepAgentsMiddleware"):
+        create_protected_deep_agent(
+            fw,
+            model=Model(responses=[AIMessage("ok")]),
+            middleware=[
+                create_deepagents_middleware(fw),
+                create_deepagents_middleware(fw),
+            ],
+        )
+    other = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.raises(ValueError, match="multiple Firewall clients"):
+        create_protected_deep_agent(
+            fw,
+            model=Model(responses=[AIMessage("ok")]),
+            middleware=[
+                create_deepagents_middleware(fw),
+                create_deepagents_middleware(other),
+            ],
+        )
+
+
+def test_reused_root_boundary_classifies_each_model_hook_once(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    hooks = []
+
+    def classify(text, **kwargs):
+        hooks.append(kwargs["hook"])
+        return BlockResult("BENIGN", 0.1, 0.5, mode="block")
+
+    monkeypatch.setattr(fw, "_classify_raw", classify)
+    existing = create_deepagents_middleware(fw)
+    agent = create_protected_deep_agent(
+        fw,
+        model=Model(responses=[AIMessage("allowed")]),
+        middleware=[existing],
+    )
+    agent.invoke({"messages": [{"role": "user", "content": "safe"}]})
+    assert hooks == [HookLabel.USER_INPUT, HookLabel.LLM_OUTPUT]
+
+
+def test_explicit_default_remains_explicit_when_profile_disables_auto_default(monkeypatch):
+    import deepagents
+    from deepagents import GeneralPurposeSubagentProfile, HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    profile = HarnessProfile(
+        general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)
+    )
+    monkeypatch.setattr(
+        harness_profiles, "_harness_profile_for_model", lambda model, spec: profile
+    )
+    captured = {}
+    monkeypatch.setattr(
+        deepagents, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or kwargs
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    create_protected_deep_agent(
+        fw,
+        model=Model(responses=[AIMessage("ok")]),
+        subagents=[{
+            "name": "general-purpose",
+            "description": "Caller-owned default",
+            "system_prompt": "Caller prompt",
+        }],
+    )
+    assert [spec["name"] for spec in captured["subagents"]] == ["general-purpose"]
+    assert captured["subagents"][0]["description"] == "Caller-owned default"
+    assert len(captured["subagents"][0]["middleware"]) == 1
+
+
+def test_profile_precedence_that_cannot_be_preserved_fails_closed(monkeypatch):
+    from deepagents import GeneralPurposeSubagentProfile, HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    from silmaril_security.sdk._deepagents_compat import DeepAgentsCompatibilityError
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    profile = HarnessProfile(
+        base_system_prompt="Root base",
+        general_purpose_subagent=GeneralPurposeSubagentProfile(
+            system_prompt="More-specific child prompt"
+        ),
+    )
+    monkeypatch.setattr(
+        harness_profiles, "_harness_profile_for_model", lambda model, spec: profile
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.raises(DeepAgentsCompatibilityError, match="precedence cannot be preserved"):
+        create_protected_deep_agent(
+            fw, model=Model(responses=[AIMessage("unreachable")])
+        )
+
+
+def test_private_compatibility_version_guard_is_actionable(monkeypatch):
+    import silmaril_security.sdk._deepagents_compat as compat
+
+    monkeypatch.setattr(compat, "version", lambda distribution: "0.8.0")
+    with pytest.raises(
+        compat.DeepAgentsCompatibilityError,
+        match=r"deepagents>=0\.7\.30,<0\.8.*found deepagents==0\.8\.0",
+    ):
+        compat.resolve_model_and_profile(object())
+
+
+def test_registered_string_profile_constructs_model_once_and_preserves_default(monkeypatch):
+    import deepagents.graph
+    from deepagents import GeneralPurposeSubagentProfile, HarnessProfile
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    model = Model(responses=[AIMessage("ok")])
+    model_spec = "unrecoverable-provider:registered-alias"
+    profile = HarnessProfile(
+        general_purpose_subagent=GeneralPurposeSubagentProfile(
+            description="Registered description",
+            system_prompt="Registered prompt",
+        )
+    )
+    harness_profiles._ensure_harness_profiles_loaded()
+    monkeypatch.setitem(harness_profiles._HARNESS_PROFILES, model_spec, profile)
+    assert harness_profiles._harness_profile_for_model(model, None) != profile
+
+    resolved_strings = []
+    resolved_objects = []
+
+    def resolve(value):
+        if isinstance(value, str):
+            resolved_strings.append(value)
+            return model
+        resolved_objects.append(value)
+        return value
+
+    monkeypatch.setattr(deepagents.graph, "resolve_model", resolve)
+    captured = {}
+
+    class Agent:
+        def with_config(self, config):
+            return self
+
+    def make(model_arg, **kwargs):
+        captured["model"] = model_arg
+        captured.update(kwargs)
+        return Agent()
+
+    monkeypatch.setattr(deepagents.graph, "create_agent", make)
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    create_protected_deep_agent(fw, model=model_spec)
+
+    task = next(
+        entry
+        for entry in captured["middleware"]
+        if isinstance(entry, SubAgentMiddleware)
+    )
+    default = task._subagents[0]
+    assert resolved_strings == [model_spec]
+    assert resolved_objects == [model]
+    assert captured["model"] is model
+    assert default["model"] is model
+    assert default["description"] == "Registered description"
+    assert default["system_prompt"] == "Registered prompt"
+
+
+def test_registered_string_profile_fails_closed_for_unrecoverable_root_overlays(monkeypatch):
+    import deepagents.graph
+    from deepagents import HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+
+    from silmaril_security.sdk._deepagents_compat import DeepAgentsCompatibilityError
+
+    model_spec = "unrecoverable-provider:root-overlay"
+    harness_profiles._ensure_harness_profiles_loaded()
+    monkeypatch.setitem(
+        harness_profiles._HARNESS_PROFILES,
+        model_spec,
+        HarnessProfile(system_prompt_suffix="Cannot safely infer child recovery"),
+    )
+    monkeypatch.setattr(
+        deepagents.graph,
+        "resolve_model",
+        lambda value: pytest.fail("compatibility failure must precede model construction"),
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.raises(
+        DeepAgentsCompatibilityError,
+        match="runtime-registered string profile.*root-level",
+    ):
+        create_protected_deep_agent(fw, model=model_spec)
+
+
+def test_default_model_is_built_once_and_reused_without_sdk_credential_access(monkeypatch):
+    import deepagents
+    import deepagents.graph
+    from deepagents import HarnessProfile
+    from deepagents.profiles.harness import harness_profiles
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, *args, **kwargs):
+            return self
+
+    model = Model(responses=[AIMessage("ok")])
+    calls = []
+    monkeypatch.setattr(
+        deepagents.graph,
+        "_build_default_model",
+        lambda: calls.append("built") or model,
+    )
+    monkeypatch.setattr(
+        harness_profiles,
+        "_harness_profile_for_model",
+        lambda actual, spec: HarnessProfile(),
+    )
+    captured = {}
+    monkeypatch.setattr(
+        deepagents, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or kwargs
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.warns(DeprecationWarning, match="model=None"):
+        create_protected_deep_agent(fw)
+    assert calls == ["built"]
+    assert captured["model"] is model
+
+
+@pytest.mark.parametrize("mode", ["isolated", "fork"])
+def test_compiled_subagent_propagates_mode_and_graph_identity(monkeypatch, mode):
+    import langchain.agents
+
+    class Graph:
+        pass
+
+    graph = Graph()
+    captured = {}
+
+    def make(**kwargs):
+        captured.update(kwargs)
+        return graph
+
+    monkeypatch.setattr(langchain.agents, "create_agent", make)
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    spec = create_protected_compiled_subagent(
+        fw,
+        name="worker",
+        description="does work",
+        mode=mode,
+        model="fake",
+    )
+    assert spec["mode"] == mode
+    assert spec["runnable"] is graph
+    assert "mode" not in captured
+
+
+def test_compiled_subagent_omits_unset_mode(monkeypatch):
+    import langchain.agents
+
+    class Graph:
+        pass
+
+    monkeypatch.setattr(langchain.agents, "create_agent", lambda **kwargs: Graph())
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    spec = create_protected_compiled_subagent(
+        fw,
+        name="worker",
+        description="does work",
+        model="fake",
+    )
+    assert "mode" not in spec
+
+
+def test_compiled_subagent_rejects_invalid_mode_before_graph_build(monkeypatch):
+    import langchain.agents
+
+    called = False
+
+    def make(**kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(langchain.agents, "create_agent", make)
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    with pytest.raises(ValueError, match="isolated.*fork"):
+        create_protected_compiled_subagent(
+            fw,
+            name="worker",
+            description="does work",
+            mode="shared",
+            model="fake",
+        )
+    assert called is False
+
+
+@pytest.mark.parametrize("mutated_mode", ["shared", None])
+def test_parent_revalidates_mutated_compiled_mode(monkeypatch, mutated_mode):
+    import deepagents
+    import langchain.agents
+
+    class Graph:
+        pass
+
+    graph = Graph()
+    monkeypatch.setattr(langchain.agents, "create_agent", lambda **kwargs: graph)
+    monkeypatch.setattr(
+        deepagents,
+        "create_deep_agent",
+        lambda **kwargs: pytest.fail("invalid mode must fail before parent construction"),
+    )
+    fw = Firewall(api_key="sk", api_url="https://example.com/classify")
+    spec = create_protected_compiled_subagent(
+        fw,
+        name="worker",
+        description="does work",
+        mode="isolated",
+        model="fake",
+    )
+    spec["mode"] = mutated_mode
+    with pytest.raises(ValueError, match="isolated.*fork"):
+        create_protected_deep_agent(fw, protected_compiled_subagents=[spec])
 
 
 def test_compiled_subagent_is_bound_to_factory_and_firewall():

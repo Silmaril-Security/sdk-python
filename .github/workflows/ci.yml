@@ -21,26 +21,32 @@ jobs:
             extras: "dev,async,langchain"
             profile: "core/async/LangChain"
             deepagents: false
+            framework-pins: "langchain-core==1.7.6 langgraph==1.2.20"
           - python-version: "3.11"
             extras: "dev,async,langchain,deepagents"
             profile: "core/async/LangChain/Deep Agents"
             deepagents: true
+            framework-pins: "deepagents==0.7.34 langchain==1.4.9 langchain-core==1.7.6 langgraph==1.2.20"
           - python-version: "3.12"
             extras: "dev,async,langchain,deepagents"
             profile: "core/async/LangChain/Deep Agents"
             deepagents: true
+            framework-pins: "deepagents==0.7.34 langchain==1.4.9 langchain-core==1.7.6 langgraph==1.2.20"
           - python-version: "3.13"
             extras: "dev,async,langchain,deepagents"
             profile: "core/async/LangChain/Deep Agents"
             deepagents: true
+            framework-pins: "deepagents==0.7.34 langchain==1.4.9 langchain-core==1.7.6 langgraph==1.2.20"
           - python-version: "3.14"
             extras: "dev,async,langchain,deepagents"
             profile: "core/async/LangChain/Deep Agents"
             deepagents: true
+            framework-pins: "deepagents==0.7.34 langchain==1.4.9 langchain-core==1.7.6 langgraph==1.2.20"
           - python-version: "3.15"
             extras: "dev,async,langchain,deepagents"
             profile: "core/async/LangChain/Deep Agents"
             deepagents: true
+            framework-pins: "deepagents==0.7.34 langchain==1.4.9 langchain-core==1.7.6 langgraph==1.2.20"
 
     steps:
       - name: Checkout
@@ -55,7 +61,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[${{ matrix.extras }}]"
+          python -m pip install -e ".[${{ matrix.extras }}]" ${{ matrix.framework-pins }}
+          python -m pip check
 
       - name: Ruff
         run: ruff check src tests
@@ -93,26 +100,54 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - profile: langchain
+          - profile: langchain-0.3
+            module: langchain_core
             python: "3.10"
-            dependency: "langchain-core==0.2.0"
+            dependencies: "langchain-core==0.3.85 langgraph==0.6.11"
             extras: "langchain"
+            build_tools: "build>=1.2.0"
+          - profile: langchain-1.x
+            module: langchain_core
+            python: "3.10"
+            dependencies: "langchain-core==1.3.3 langgraph==1.0.2"
+            extras: "langchain"
+            build_tools: "build>=1.2.0 twine>=7.0.0"
           - profile: deepagents
+            module: deepagents
             python: "3.11"
-            dependency: "deepagents==0.7.30"
+            dependencies: "deepagents==0.7.30 langchain==1.4.6 langchain-core==1.6.12 langgraph==1.2.12"
             extras: "langchain,deepagents"
+            build_tools: "build>=1.2.0 twine>=7.0.0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - name: Install minimum supported integration
-        run: python -m pip install -e ".[${{ matrix.extras }}]" "${{ matrix.dependency }}" "pytest>=7.4.0" "pytest-asyncio>=0.23.0"
+        run: |
+          python -m pip install -e ".[${{ matrix.extras }}]" ${{ matrix.dependencies }} \
+            "pytest>=7.4.0" "pytest-asyncio>=0.23.0" ${{ matrix.build_tools }}
+          python -m pip check
       - name: Require the selected integration
-        run: python -c "import ${{ matrix.profile == 'langchain' && 'langchain_core' || 'deepagents' }}"
+        run: python -c "import ${{ matrix.module }}"
       - name: Exercise native thread integration
-        run: python -m pytest tests/test_langchain.py tests/test_thread_identity.py -q
+        run: python -m pytest tests/test_package_metadata.py tests/test_langchain.py tests/test_thread_identity.py -q
 
       - name: Test Deep Agents remote protocol minimum
         if: matrix.profile == 'deepagents'
         run: python -m pytest tests/test_deepagents.py tests/test_deepagents_remote.py -q
+
+      - name: Build minimum package
+        run: python -m build
+
+      - name: Check minimum package metadata
+        if: matrix.profile != 'langchain-0.3'
+        run: python -m twine check dist/*
+
+      - name: Verify minimum installed wheel
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          python -m pip check
+          cp scripts/verify_thread_package.py "$RUNNER_TEMP/verify_thread_package.py"
+          cd "$RUNNER_TEMP"
+          python verify_thread_package.py
