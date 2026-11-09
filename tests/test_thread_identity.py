@@ -16,7 +16,7 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.retrievers import BaseRetriever
-from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.runnables.config import var_child_runnable_config
 from langchain_core.tools import tool
 
@@ -580,11 +580,13 @@ async def test_shared_callback_handler_isolates_concurrent_graph_threads(monkeyp
     handler = (fw.as_async_langchain_handler if asynchronous else fw.as_langchain_handler)(hooks=ALL_HOOKS)
     graph = StateGraph(MessagesState)
 
-    def node(state):
-        return {"messages": [EchoModel().invoke(state["messages"])]}
+    def node(state, config: RunnableConfig):
+        return {"messages": [EchoModel().invoke(state["messages"], config=config)]}
 
-    async def anode(state):
-        return {"messages": [await EchoModel().ainvoke(state["messages"])]}
+    async def anode(state, config: RunnableConfig):
+        # Python 3.10 cannot propagate LangGraph's runnable ContextVar into
+        # async node tasks, so nested runnable calls must forward config.
+        return {"messages": [await EchoModel().ainvoke(state["messages"], config=config)]}
 
     graph.add_node("model", anode if asynchronous else node)
     graph.add_edge(START, "model")

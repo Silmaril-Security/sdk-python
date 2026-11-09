@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.1
+
+- Retain the safe optional LangChain ranges `langchain-core>=0.3.85,<1` and
+  `langchain-core>=1.3.3,<2`, excluding affected 1.0–1.2 and early 1.3
+  serialization intervals while preserving qualified 0.3 applications.
+- Honor the released Deep Agents 0.7.x general-purpose profile contract in
+  protected factories: disabled defaults stay disabled, profile description and
+  prompt customizations are preserved, parent tools and skills reach the
+  protected default, string models are constructed once, and explicit named
+  children are not duplicated. Released profiles expose `enabled`,
+  `description`, and `system_prompt`; they do not expose a rename field.
+- Reject duplicate, foreign, or option-conflicting Silmaril middleware instead
+  of silently weakening or duplicating a protected boundary. Fail actionably
+  when a runtime-only string profile or released prompt/middleware combination
+  cannot be represented exactly for the protected child.
+- Add optional `isolated`/`fork` mode to protected compiled subagents while
+  preserving the exact protected graph and Firewall provenance. Fork mode
+  remains beta upstream.
+
 ## 0.9.0
 
 - Support native remote Deep Agents subagents with parent delegation/result checks
