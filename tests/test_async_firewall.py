@@ -58,6 +58,19 @@ def test_constructor_reports_async_extra_when_httpx_is_unavailable(monkeypatch):
         AsyncFirewall(api_key="sk", api_url=TEST_API_URL)
 
 
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_constructor_rejects_invalid_async_timeout(timeout):
+    with pytest.raises(ValueError, match="timeout must be positive and finite"):
+        AsyncFirewall(api_key="sk-test", api_url=TEST_API_URL, timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", [0.001, 10.0])
+def test_constructor_accepts_positive_finite_async_timeout(timeout):
+    fw = AsyncFirewall(api_key="sk-test", api_url=TEST_API_URL, timeout=timeout)
+
+    assert fw.timeout == timeout
+
+
 @pytest.mark.asyncio
 async def test_concurrent_classify_calls_overlap_and_keep_state_independent():
     active = 0
