@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.2
+
+- Reject zero, negative, and non-finite asynchronous request timeouts at
+  construction, matching the synchronous Firewall validation contract.
+
 ## 0.9.1
 
 - Retain the safe optional LangChain ranges `langchain-core>=0.3.85,<1` and

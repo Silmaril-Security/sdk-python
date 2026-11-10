@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -105,8 +106,8 @@ class AsyncFirewall:
             raise ValueError("Firewall: api_key is required")
         if not api_url:
             raise ValueError("Firewall: api_url is required")
-        if timeout < 0:
-            raise ValueError(f"Firewall: timeout must be non-negative, got {timeout}")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(f"Firewall: timeout must be positive and finite, got {timeout}")
         if max_retries < 0:
             raise ValueError(f"Firewall: max_retries must be non-negative, got {max_retries}")
 
