@@ -279,7 +279,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Silmaril-Security/SilmarilCustomerTests
-          ref: d9707b9ff86a463db2272610ff19d898b0d227b3
+          ref: 65bb985b21bedbddca4c8d8e5e29faacb406c44b
           token: ${{ steps.reader.outputs.token }}
           path: _customer
           persist-credentials: false
@@ -304,13 +304,16 @@ jobs:
           artifact: ${{ steps.package.outputs.path }}
           consumer: customer/consumer.py
           source-sha: ${{ github.sha }}
-          framework-sha: d9707b9ff86a463db2272610ff19d898b0d227b3
+          framework-sha: 65bb985b21bedbddca4c8d8e5e29faacb406c44b
         env:
           SILMARIL_API_URL: ${{ vars.CUSTOMER_API_URL }}
           SILMARIL_API_KEY: ${{ secrets.CUSTOMER_API_KEY }}
           CUSTOMER_BACKEND_ID: ${{ vars.CUSTOMER_BACKEND_ID }}
           CUSTOMER_TESTS_READ_TOKEN: ${{ steps.reader.outputs.token }}
           CUSTOMER_UI_URL: ${{ vars.CUSTOMER_UI_URL }}
+          CUSTOMER_LOGIN_EMAIL: ${{ secrets.CUSTOMER_LOGIN_EMAIL }}
+          CUSTOMER_LOGIN_PASSWORD: ${{ secrets.CUSTOMER_LOGIN_PASSWORD }}
+          CUSTOMER_ORGANIZATION_ID: ${{ vars.CUSTOMER_ORGANIZATION_ID }}
           CUSTOMER_UI_STORAGE_STATE_JSON: ${{ secrets.CUSTOMER_UI_STORAGE_STATE_JSON }}
           CUSTOMER_FIREWALL_ID: ${{ vars.CUSTOMER_FIREWALL_ID }}
           CUSTOMER_MCP_URL: ${{ vars.CUSTOMER_MCP_URL }}
