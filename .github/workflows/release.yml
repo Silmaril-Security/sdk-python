@@ -1,4 +1,4 @@
-name: Release
+name: Main qualification and release
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -16,6 +17,7 @@ jobs:
     name: Plan release
     runs-on: ubuntu-latest
     outputs:
+      should_test: ${{ steps.selection.outputs.should_test }}
       should_release: ${{ steps.plan.outputs.should_release }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
@@ -29,6 +31,23 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Select affected customer journeys
+        id: selection
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          python - <<'PYCODE'
+          import os, subprocess
+          before = os.environ.get('BEFORE', '')
+          try:
+              paths = subprocess.check_output(['git', 'diff', '--name-only', before, 'HEAD'], stderr=subprocess.DEVNULL, text=True).splitlines()
+              selected = not paths or any(not (p.endswith(('.md', '.mdx')) or p.startswith('docs/')) for p in paths)
+          except subprocess.CalledProcessError:
+              selected = True
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('should_test=' + str(selected).lower() + '\n')
+          PYCODE
 
       - name: Decide whether to release
         id: plan
@@ -106,7 +125,7 @@ jobs:
     name: Build distribution
     runs-on: ubuntu-latest
     needs: plan
-    if: needs.plan.outputs.should_release == 'true'
+    if: needs.plan.outputs.should_test == 'true' || needs.plan.outputs.should_release == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -155,7 +174,7 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [plan, build]
+    needs: [plan, build, customer]
     if: needs.plan.outputs.should_release == 'true'
     environment: pypi
     permissions:
@@ -216,3 +235,92 @@ jobs:
           else
             gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
           fi
+
+  customer:
+    name: Customer acceptance
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - name: Check shared runner configuration
+        id: configured
+        env:
+          APP_KEY: ${{ secrets.CUSTOMER_TESTS_APP_PRIVATE_KEY }}
+          APP_ID: ${{ vars.CUSTOMER_TESTS_APP_CLIENT_ID }}
+        run: |
+          if [ -n "$APP_KEY" ] && [ -n "$APP_ID" ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p results
+            echo '{"status":"BLOCKED","errors":["Configure the customer testing GitHub App and Test Tenant A credentials"]}' > results/result.json
+            echo '## Customer qualification: BLOCKED — shared runner access is not configured' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Create scoped repository read token
+        if: steps.configured.outputs.ready == 'true'
+        id: reader
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.CUSTOMER_TESTS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CUSTOMER_TESTS_APP_PRIVATE_KEY }}
+          owner: Silmaril-Security
+          repositories: SilmarilCustomerTests,firewall-ui,silmaril-firewall-mcp
+          permission-contents: read
+      - name: Checkout pinned shared runner
+        if: steps.configured.outputs.ready == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Silmaril-Security/SilmarilCustomerTests
+          ref: 1a77a9bfcb634c2851fb966261f4413e1542e158
+          token: ${{ steps.reader.outputs.token }}
+          path: _customer
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve package artifact
+        if: steps.configured.outputs.ready == 'true'
+        id: package
+        run: |
+          files=(dist/*.whl)
+          test "${#files[@]}" = 1 && test -f "${files[0]}"
+          echo "path=${files[0]}" >> "$GITHUB_OUTPUT"
+      - name: Customer journey
+        if: steps.configured.outputs.ready == 'true'
+        id: acceptance
+        uses: ./_customer
+        with:
+          sdk: python
+          artifact: ${{ steps.package.outputs.path }}
+          consumer: customer/consumer.py
+          source-sha: ${{ github.sha }}
+          framework-sha: 1a77a9bfcb634c2851fb966261f4413e1542e158
+        env:
+          SILMARIL_API_URL: ${{ vars.CUSTOMER_API_URL }}
+          SILMARIL_API_KEY: ${{ secrets.CUSTOMER_API_KEY }}
+          CUSTOMER_BACKEND_ID: ${{ vars.CUSTOMER_BACKEND_ID }}
+          CUSTOMER_TESTS_READ_TOKEN: ${{ steps.reader.outputs.token }}
+          CUSTOMER_UI_URL: ${{ vars.CUSTOMER_UI_URL }}
+          CUSTOMER_LOGIN_EMAIL: ${{ secrets.CUSTOMER_LOGIN_EMAIL }}
+          CUSTOMER_LOGIN_PASSWORD: ${{ secrets.CUSTOMER_LOGIN_PASSWORD }}
+          CUSTOMER_ORGANIZATION_ID: ${{ vars.CUSTOMER_ORGANIZATION_ID }}
+          CUSTOMER_UI_STORAGE_STATE_JSON: ${{ secrets.CUSTOMER_UI_STORAGE_STATE_JSON }}
+          CUSTOMER_FIREWALL_ID: ${{ vars.CUSTOMER_FIREWALL_ID }}
+          CUSTOMER_MCP_URL: ${{ vars.CUSTOMER_MCP_URL }}
+          CUSTOMER_MCP_ACCESS_TOKEN: ${{ secrets.CUSTOMER_MCP_ACCESS_TOKEN }}
+      - name: Upload customer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: customer-qualification
+          retention-days: 7
+          path: results/
+          if-no-files-found: warn
+      - name: Enforce qualified rollout
+        env:
+          OUTCOME: ${{ steps.acceptance.outcome }}
+        run: test "$OUTCOME" = success
