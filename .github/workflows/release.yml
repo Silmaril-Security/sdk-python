@@ -237,7 +237,6 @@ jobs:
           fi
 
   customer:
-    continue-on-error: ${{ vars.CUSTOMER_ACCEPTANCE_REQUIRED != 'true' }}
     name: Customer acceptance
     needs: build
     runs-on: ubuntu-24.04
@@ -259,9 +258,9 @@ jobs:
             mkdir -p results
             echo '{"status":"BLOCKED","errors":["Configure the customer testing GitHub App and Test Tenant A credentials"]}' > results/result.json
             echo '## Customer qualification: BLOCKED — shared runner access is not configured' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
       - name: Create scoped repository read token
-        continue-on-error: true
         if: steps.configured.outputs.ready == 'true'
         id: reader
         uses: actions/create-github-app-token@v3
@@ -272,7 +271,6 @@ jobs:
           repositories: SilmarilCustomerTests,firewall-ui,silmaril-firewall-mcp
           permission-contents: read
       - name: Checkout pinned shared runner
-        continue-on-error: true
         if: steps.configured.outputs.ready == 'true'
         uses: actions/checkout@v4
         with:
@@ -285,7 +283,6 @@ jobs:
         with:
           python-version: '3.12'
       - name: Resolve package artifact
-        continue-on-error: true
         if: steps.configured.outputs.ready == 'true'
         id: package
         run: |
@@ -295,7 +292,6 @@ jobs:
       - name: Customer journey
         if: steps.configured.outputs.ready == 'true'
         id: acceptance
-        continue-on-error: true
         uses: ./_customer
         with:
           sdk: python
@@ -325,7 +321,6 @@ jobs:
           path: results/
           if-no-files-found: warn
       - name: Enforce qualified rollout
-        if: vars.CUSTOMER_ACCEPTANCE_REQUIRED == 'true'
         env:
           OUTCOME: ${{ steps.acceptance.outcome }}
         run: test "$OUTCOME" = success
