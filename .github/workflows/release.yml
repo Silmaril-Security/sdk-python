@@ -7,6 +7,7 @@ on:
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -240,9 +241,6 @@ jobs:
     name: Customer acceptance
     needs: build
     runs-on: ubuntu-24.04
-    concurrency:
-      group: test-tenant-a
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -279,7 +277,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Silmaril-Security/SilmarilCustomerTests
-          ref: b426fc749e6d3c57e150578b8ca59c01988d6c90
+          ref: 1a77a9bfcb634c2851fb966261f4413e1542e158
           token: ${{ steps.reader.outputs.token }}
           path: _customer
           persist-credentials: false
@@ -304,7 +302,7 @@ jobs:
           artifact: ${{ steps.package.outputs.path }}
           consumer: customer/consumer.py
           source-sha: ${{ github.sha }}
-          framework-sha: b426fc749e6d3c57e150578b8ca59c01988d6c90
+          framework-sha: 1a77a9bfcb634c2851fb966261f4413e1542e158
         env:
           SILMARIL_API_URL: ${{ vars.CUSTOMER_API_URL }}
           SILMARIL_API_KEY: ${{ secrets.CUSTOMER_API_KEY }}
