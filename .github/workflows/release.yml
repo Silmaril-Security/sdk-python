@@ -239,7 +239,7 @@ jobs:
     continue-on-error: ${{ vars.CUSTOMER_ACCEPTANCE_REQUIRED != 'true' }}
     name: Customer acceptance
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: test-tenant-a
       cancel-in-progress: false
@@ -279,7 +279,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Silmaril-Security/SilmarilCustomerTests
-          ref: 65bb985b21bedbddca4c8d8e5e29faacb406c44b
+          ref: b426fc749e6d3c57e150578b8ca59c01988d6c90
           token: ${{ steps.reader.outputs.token }}
           path: _customer
           persist-credentials: false
@@ -304,7 +304,7 @@ jobs:
           artifact: ${{ steps.package.outputs.path }}
           consumer: customer/consumer.py
           source-sha: ${{ github.sha }}
-          framework-sha: 65bb985b21bedbddca4c8d8e5e29faacb406c44b
+          framework-sha: b426fc749e6d3c57e150578b8ca59c01988d6c90
         env:
           SILMARIL_API_URL: ${{ vars.CUSTOMER_API_URL }}
           SILMARIL_API_KEY: ${{ secrets.CUSTOMER_API_KEY }}
