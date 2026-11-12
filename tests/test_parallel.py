@@ -575,3 +575,40 @@ async def test_callback_close_during_a_close_started_elsewhere_does_not_deadlock
     await asyncio.wait_for(outside, WAIT_SECONDS)
     await asyncio.wait_for(closed_from_callback.wait(), WAIT_SECONDS)
     assert client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_flush_from_a_callback_does_not_hide_its_work_from_other_flushes(monkeypatch):
+    held = AsyncHeldClassification()
+    held.release.set()
+    flushed_inside = asyncio.Event()
+    finish_callback = asyncio.Event()
+
+    async def flush_then_keep_working(event: ClassifyEvent) -> None:
+        if event.hook == HookLabel.USER_INPUT:
+            await fw.flush()
+            flushed_inside.set()
+            await asyncio.wait_for(finish_callback.wait(), WAIT_SECONDS)
+
+    fw = _async_firewall(monkeypatch, held, mode="shadow", on_classify=flush_then_keep_working)
+
+    async def operation() -> str:
+        return "answer"
+
+    await fw.protect(
+        operation,
+        text="prompt",
+        hook=HookLabel.USER_INPUT,
+        metadata={"conversationId": "conversation-1"},
+        output=str,
+    )
+    await asyncio.wait_for(flushed_inside.wait(), WAIT_SECONDS)
+    outside = asyncio.ensure_future(fw.flush())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not outside.done()
+    assert [text for text, _ in held.calls] == ["prompt"]
+
+    finish_callback.set()
+    await asyncio.wait_for(outside, WAIT_SECONDS)
+    assert [text for text, _ in held.calls] == ["prompt", "answer"]

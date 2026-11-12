@@ -275,28 +275,43 @@ class AsyncPendingVerdicts:
             del self._tails[conversation]
         _retrieve(done)
 
-    def _skippable(self, link: asyncio.Task[None] | None) -> bool:
+    def _skippable(
+        self, link: asyncio.Task[None] | None, skipped: set[asyncio.Task[None]]
+    ) -> bool:
         while link is not None:
-            if link in self._skipped:
+            if link in skipped:
                 return True
             link = self._previous.get(link)
         return False
 
-    def skip(self, caller: asyncio.Task[Any] | None) -> None:
-        """Stop draining work that cannot finish before ``caller`` returns.
+    def skip(self, caller: asyncio.Task[Any] | None) -> asyncio.Task[None] | None:
+        """Exclude from every drain the work that cannot finish before ``caller`` returns.
 
         A caller running inside a queued classification, such as its
         ``on_classify`` callback, holds that classification and everything
-        queued behind it open, so a drain it waits on must not wait for them.
+        queued behind it open. Pass the result to ``unskip`` when the caller
+        stops waiting.
         """
         blocker = self._sending.get(caller) if caller is not None else None
         if blocker is not None:
             self._skipped.add(blocker)
             self._skips.set()
+        return blocker
 
-    async def drain(self) -> None:
-        """Wait until every classification started so far has had its turn."""
-        while waiting := {link for link in self._outstanding if not self._skippable(link)}:
+    def unskip(self, blocker: asyncio.Task[None] | None) -> None:
+        self._skipped.discard(blocker)
+
+    async def drain(self, caller: asyncio.Task[Any] | None = None) -> None:
+        """Wait until every classification started so far has had its turn.
+
+        Work that ``caller`` is running inside is excluded for this drain only.
+        """
+        own = self._sending.get(caller) if caller is not None else None
+        while waiting := {
+            link
+            for link in self._outstanding
+            if not self._skippable(link, self._skipped | {own})
+        }:
             self._skips.clear()
             skipped = asyncio.ensure_future(self._skips.wait())
             try:
