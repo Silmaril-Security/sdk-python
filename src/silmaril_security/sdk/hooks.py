@@ -37,6 +37,7 @@ DEFAULT_HOOKS: frozenset[FirewallHook] = frozenset(
         FirewallHook.CHAT_MODEL_START,
         FirewallHook.TOOL_START,
         FirewallHook.TOOL_END,
+        FirewallHook.LLM_END,
     }
 )
 
