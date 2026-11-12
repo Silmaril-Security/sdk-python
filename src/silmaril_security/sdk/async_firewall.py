@@ -208,7 +208,7 @@ class AsyncFirewall:
 
     async def _drain_and_close(self) -> None:
         try:
-            await self._pending.drain()
+            await self._pending.drain(closing=True)
             if self._active_requests:
                 await self._idle.wait()
             if self._owns_client and self._client is not None:

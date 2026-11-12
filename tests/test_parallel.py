@@ -612,3 +612,33 @@ async def test_flush_from_a_callback_does_not_hide_its_work_from_other_flushes(m
     finish_callback.set()
     await asyncio.wait_for(outside, WAIT_SECONDS)
     assert [text for text, _ in held.calls] == ["prompt", "answer"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callbacks_that_flush_do_not_wait_for_each_other(monkeypatch):
+    held = AsyncHeldClassification()
+    held.release.set()
+    flushed: list[str] = []
+    inside = 0
+    entered = asyncio.Event()
+
+    async def flush_inside(event: ClassifyEvent) -> None:
+        nonlocal inside
+        inside += 1
+        if inside == 2:
+            entered.set()
+        await asyncio.wait_for(entered.wait(), WAIT_SECONDS)
+        await fw.flush()
+        flushed.append(event.text)
+
+    fw = _async_firewall(monkeypatch, held, mode="shadow", on_classify=flush_inside)
+
+    async def operation() -> None:
+        return None
+
+    await fw.protect(operation, text="first", metadata={"conversationId": "conversation-1"})
+    await fw.protect(operation, text="second")
+    await asyncio.wait_for(fw.flush(), WAIT_SECONDS)
+
+    assert sorted(flushed) == ["first", "second"]
+    assert fw._pending._outstanding == set()

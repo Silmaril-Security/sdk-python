@@ -193,7 +193,8 @@ class AsyncPendingVerdicts:
         self._outstanding: set[asyncio.Task[None]] = set()
         self._previous: dict[asyncio.Task[None], asyncio.Task[None]] = {}
         self._sending: dict[asyncio.Future[Any], asyncio.Task[None]] = {}
-        self._skipped: set[asyncio.Task[None]] = set()
+        self._closers: set[asyncio.Task[None]] = set()
+        self._flushers: set[asyncio.Task[None]] = set()
         self._skips = asyncio.Event()
 
     def submit(
@@ -269,7 +270,8 @@ class AsyncPendingVerdicts:
     ) -> None:
         self._outstanding.discard(done)
         self._previous.pop(done, None)
-        self._skipped.discard(done)
+        self._closers.discard(done)
+        self._flushers.discard(done)
         self._depths.leave(conversation, background)
         if conversation is not None and self._tails.get(conversation) is done:
             del self._tails[conversation]
@@ -284,40 +286,55 @@ class AsyncPendingVerdicts:
             link = self._previous.get(link)
         return False
 
+    def _excluded(self, inside: bool, closing: bool) -> set[asyncio.Task[None]]:
+        if closing:
+            return self._closers
+        return self._closers | self._flushers if inside else set()
+
     def skip(self, caller: asyncio.Task[Any] | None) -> asyncio.Task[None] | None:
-        """Exclude from every drain the work that cannot finish before ``caller`` returns.
+        """Exclude from the closing drain the work held open by a caller awaiting the close.
 
         A caller running inside a queued classification, such as its
-        ``on_classify`` callback, holds that classification and everything
-        queued behind it open. Pass the result to ``unskip`` when the caller
-        stops waiting.
+        ``on_classify`` callback, keeps that classification and everything
+        queued behind it from finishing. Pass the result to ``unskip`` when the
+        caller stops waiting.
         """
         blocker = self._sending.get(caller) if caller is not None else None
         if blocker is not None:
-            self._skipped.add(blocker)
+            self._closers.add(blocker)
             self._skips.set()
         return blocker
 
     def unskip(self, blocker: asyncio.Task[None] | None) -> None:
-        self._skipped.discard(blocker)
+        self._closers.discard(blocker)
 
-    async def drain(self, caller: asyncio.Task[Any] | None = None) -> None:
+    async def drain(self, caller: asyncio.Task[Any] | None = None, *, closing: bool = False) -> None:
         """Wait until every classification started so far has had its turn.
 
-        Work that ``caller`` is running inside is excluded for this drain only.
+        A drain awaited from inside a queued classification cannot wait for that
+        classification, nor for others whose callbacks are themselves waiting on
+        a drain or a close, because none of them can finish first. A drain from
+        outside waits for all of them; the closing drain skips only callers
+        that are awaiting the close.
         """
         own = self._sending.get(caller) if caller is not None else None
-        while waiting := {
-            link
-            for link in self._outstanding
-            if not self._skippable(link, self._skipped | {own})
-        }:
-            self._skips.clear()
-            skipped = asyncio.ensure_future(self._skips.wait())
-            try:
-                await asyncio.wait({*waiting, skipped}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                skipped.cancel()
+        if own is not None:
+            self._flushers.add(own)
+            self._skips.set()
+        try:
+            while waiting := {
+                link
+                for link in self._outstanding
+                if not self._skippable(link, self._excluded(own is not None, closing))
+            }:
+                self._skips.clear()
+                skipped = asyncio.ensure_future(self._skips.wait())
+                try:
+                    await asyncio.wait({*waiting, skipped}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    skipped.cancel()
+        finally:
+            self._flushers.discard(own)
 
 
 async def race(
