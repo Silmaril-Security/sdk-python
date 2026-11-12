@@ -14,8 +14,12 @@
 - Classify in the background in Shadow mode for the LangChain handlers and
   Deep Agents middleware unless `fail_open=False`.
 - Send classifications that share `metadata.conversationId` in the order they
-  were started. Add `max_concurrent` and `max_queued` client options and
-  `flush()`; `AsyncFirewall.aclose()` drains background classifications.
+  were started, including the Block-mode `protect()` output check. Add
+  `max_concurrent` and `max_queued` client options and `flush()`;
+  `AsyncFirewall.aclose()` drains background classifications. Background
+  classifications are also bounded in total at `max_concurrent * max_queued`.
+- Copy `protect()` metadata at call time, and withdraw an unsent Block-mode
+  check when the operation fails or the awaiting task is cancelled.
 
 ## 0.9.2
 

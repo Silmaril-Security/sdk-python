@@ -22,6 +22,7 @@ from silmaril_security.sdk._pending import (
     RETRY_LIMIT,
     PendingVerdicts,
     conversation_id,
+    snapshot,
     validate_limits,
 )
 from silmaril_security.sdk._version import VERSION
@@ -615,6 +616,7 @@ class Firewall:
         output: Callable[[_Result], str] | None = None,
     ) -> _Result:
         """Run an operation while its input is classified and withhold a blocked result."""
+        metadata = snapshot(metadata)
         classify = partial(self.classify, metadata=metadata, mode=mode, review=review)
         conversation = conversation_id(metadata)
         enforcing = _enforces(self._effective_mode(mode, None))
@@ -630,18 +632,22 @@ class Firewall:
             conversation,
             background=not enforcing,
         )
-        result = operation()
-        if not enforcing:
-            if output is not None:
-                self._pending.submit(
-                    partial(classify, output(result), hook=HookLabel.LLM_OUTPUT),
-                    conversation,
-                    background=True,
-                )
-            return result
-        pending.result()
+        try:
+            result = operation()
+        except BaseException:
+            if enforcing:
+                pending.cancel()
+            raise
+        if enforcing:
+            pending.result()
         if output is not None:
-            classify(output(result), hook=HookLabel.LLM_OUTPUT)
+            generated = self._pending.submit(
+                partial(classify, output(result), hook=HookLabel.LLM_OUTPUT),
+                conversation,
+                background=not enforcing,
+            )
+            if enforcing:
+                generated.result()
         return result
 
     def flush(self) -> None:

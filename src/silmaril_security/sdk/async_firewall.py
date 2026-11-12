@@ -19,6 +19,7 @@ from silmaril_security.sdk._pending import (
     AsyncPendingVerdicts,
     conversation_id,
     race,
+    snapshot,
     validate_limits,
 )
 from silmaril_security.sdk.exceptions import (
@@ -332,6 +333,7 @@ class AsyncFirewall:
         output: Callable[[_Result], str] | None = None,
     ) -> _Result:
         """Run an operation while its input is classified and withhold a blocked result."""
+        metadata = snapshot(metadata)
         classify = partial(self.classify, metadata=metadata, mode=mode, review=review)
         conversation = conversation_id(metadata)
         enforcing = _enforces(self._effective_mode(mode, None))
@@ -358,7 +360,9 @@ class AsyncFirewall:
             return result
         _, result = await race(pending, operation())
         if output is not None:
-            await classify(output(result), hook=HookLabel.LLM_OUTPUT)
+            await self._pending.submit(
+                partial(classify, output(result), hook=HookLabel.LLM_OUTPUT), conversation
+            )
         return result
 
     async def flush(self) -> None:

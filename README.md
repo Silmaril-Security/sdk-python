@@ -632,10 +632,17 @@ Use `protect()` only for calls whose effect can be discarded. Classify the
 arguments of a tool that writes with `classify()` before running it.
 
 Classifications that share `metadata.conversationId` are sent in the order
-they were started, so parallel checks keep the backend sequence intact.
+they were started, so parallel checks keep the backend sequence intact. That
+includes the Block-mode `output` check, which takes its turn in the same
+queue. `protect()` copies `metadata` when it is called, so later changes to
+that object do not reach a classification that is still waiting.
 `max_concurrent` bounds how many run at once. A background classification
-retries once, and one that would exceed `max_queued` unjoined checks for its
-conversation is dropped with a warning. `fw.flush()` waits for background
+retries once. It is dropped with a warning when its conversation already has
+`max_queued` unjoined checks, or when `max_concurrent * max_queued` background
+classifications are waiting across all conversations, including those without
+a `metadata.conversationId`. If the operation raises, or the task awaiting
+`AsyncFirewall.protect()` is cancelled, a Block-mode check that has not been
+sent is withdrawn and the async operation is cancelled. `fw.flush()` waits for background
 classifications to finish, for example before a serverless handler returns;
 `AsyncFirewall.aclose()` does the same before it closes. `on_classify` runs on
 a worker thread for a classification started by the synchronous `protect()`.
