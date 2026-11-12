@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
@@ -135,13 +136,24 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         scope = self._thread_runs.root(run_id)
         failure = self._deferred.failure(scope)
         if failure is not None:
-            self._deferred.take(scope)
+            self._forget_root(scope, run_id)
             raise failure
+
+    def _forget_root(self, scope: str, run_id: UUID | str) -> None:
+        """A failed verdict stays visible to sibling callbacks until its root run ends."""
+        if scope == str(run_id):
+            self._deferred.take(scope)
 
     def _settle(self, run_id: UUID | str) -> None:
         """Wait for every verdict deferred by this execution before it proceeds."""
-        for pending in self._deferred.take(self._thread_runs.root(run_id)):
-            pending.result()
+        scope = self._thread_runs.root(run_id)
+        try:
+            for pending in self._deferred.pending(scope):
+                pending.result()
+        except BaseException:
+            self._forget_root(scope, run_id)
+            raise
+        self._deferred.settled(scope)
 
     def _settle_root(self, run_id: UUID | str) -> None:
         if self._thread_runs.root(run_id) == str(run_id):
@@ -409,13 +421,28 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         scope = self._thread_runs.root(run_id)
         failure = self._deferred.failure(scope)
         if failure is not None:
-            self._deferred.take(scope)
+            self._forget_root(scope, run_id)
             raise failure
+
+    def _forget_root(self, scope: str, run_id: UUID | str) -> None:
+        """A failed verdict stays visible to sibling callbacks until its root run ends."""
+        if scope == str(run_id):
+            self._deferred.take(scope)
 
     async def _settle(self, run_id: UUID | str) -> None:
         """Wait for every verdict deferred by this execution before it proceeds."""
-        for pending in self._deferred.take(self._thread_runs.root(run_id)):
-            await pending
+        scope = self._thread_runs.root(run_id)
+        try:
+            for pending in self._deferred.pending(scope):
+                await asyncio.shield(pending)
+        except BaseException:
+            self._forget_root(scope, run_id)
+            raise
+        self._deferred.settled(scope)
+
+    async def flush(self) -> None:
+        """Wait for classifications this handler left running in the background."""
+        await self._pending.drain(asyncio.current_task())
 
     async def _settle_root(self, run_id: UUID | str) -> None:
         if self._thread_runs.root(run_id) == str(run_id):

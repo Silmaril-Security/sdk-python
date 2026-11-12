@@ -642,10 +642,15 @@ retries once. It is dropped with a warning when its conversation already has
 classifications are waiting across all conversations, including those without
 a `metadata.conversationId`. If the operation raises, or the task awaiting
 `AsyncFirewall.protect()` is cancelled, a Block-mode check that has not been
-sent is withdrawn and the async operation is cancelled. `fw.flush()` waits for background
+sent is withdrawn and the async operation is cancelled and awaited. A
+withdrawn check keeps its place in line, so later checks for that conversation
+still wait for earlier ones. `fw.flush()` waits for background
 classifications to finish, for example before a serverless handler returns;
-`AsyncFirewall.aclose()` does the same before it closes. `on_classify` runs on
-a worker thread for a classification started by the synchronous `protect()`.
+`AsyncFirewall.aclose()` does the same before it closes, and still closes the
+pool if the task awaiting it is cancelled. Calling `aclose()` from
+`on_classify` does not wait for classifications queued behind the one that
+invoked the callback. `on_classify` runs on a worker thread for a
+classification started by the synchronous `protect()`.
 
 ## Migration Notes
 
@@ -739,8 +744,12 @@ joined when the model call ends, before a tool starts, and when the run ends.
 The `tool_call` and `llm_output` checks always wait for their verdict. A block
 that has already arrived is raised at the next callback, including the next
 streamed token. Callbacks cannot cancel a model call, so a late block discards
-its output. In Shadow mode every check runs in the background and nothing is
-joined, unless `fail_open=False` requires each classification to succeed.
+its output. A deferred block stays visible to every callback of that run until
+the run ends, so concurrent branches all stop on it. In Shadow mode every check
+runs in the background and nothing is joined, unless `fail_open=False` requires
+each classification to succeed. `fw.flush()` waits for those checks; an async
+handler created from a synchronous `Firewall` tracks its own, so await
+`handler.flush()` there.
 
 Async LangChain:
 

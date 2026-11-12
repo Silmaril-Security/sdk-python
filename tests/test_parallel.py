@@ -6,7 +6,7 @@ import asyncio
 import threading
 
 import pytest
-from held import WAIT_SECONDS, AsyncHeldClassification, HeldClassification
+from held import WAIT_SECONDS, AsyncHeldClassification, HeldClassification, verdict
 
 from silmaril_security.sdk import (
     AsyncFirewall,
@@ -184,10 +184,12 @@ def test_failed_operation_withdraws_a_verdict_that_was_not_sent(monkeypatch):
 
     with pytest.raises(LookupError, match="model unavailable"):
         fw.protect(operation, text="never sent", metadata=metadata, mode="block")
+    fw.protect(lambda: None, text="later event", metadata=metadata)
+    assert [text for text, _ in held.calls] == ["earlier event"]
+
     held.release.set()
     fw.flush()
-
-    assert [text for text, _ in held.calls] == ["earlier event"]
+    assert [text for text, _ in held.calls] == ["earlier event", "later event"]
 
 
 def test_background_classifications_retry_once():
@@ -231,15 +233,15 @@ async def test_async_protect_cancels_the_operation_when_the_block_lands_first(mo
     async def operation() -> str:
         try:
             await asyncio.Event().wait()
-        except asyncio.CancelledError:
+        finally:
+            await asyncio.sleep(0)
             cancelled.set()
-            raise
         return "unreachable"
 
     with pytest.raises(FirewallBlockedException):
         await fw.protect(operation, text="attack", hook=HookLabel.USER_INPUT)
 
-    await asyncio.wait_for(cancelled.wait(), WAIT_SECONDS)
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -319,12 +321,17 @@ async def test_cancelled_async_protect_leaves_nothing_queued(monkeypatch):
     protected.cancel()
     with pytest.raises(asyncio.CancelledError):
         await protected
-    await asyncio.wait_for(cancelled.wait(), WAIT_SECONDS)
+    assert cancelled.is_set()
+    later = fw._pending.submit(lambda: fw.classify("later event", metadata=metadata), "conversation-1")
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert [text for text, _ in held.calls] == ["earlier event"]
 
     held.release.set()
     await earlier
+    await later
     await fw.flush()
-    assert [text for text, _ in held.calls] == ["earlier event"]
+    assert [text for text, _ in held.calls] == ["earlier event", "later event"]
     assert fw._pending._outstanding == set()
 
 
@@ -344,3 +351,199 @@ async def test_async_queued_classification_keeps_the_metadata_it_was_started_wit
     await fw.flush()
 
     assert [options["metadata"]["tenant"] for _, options in held.calls] == [{"plan": "trial"}] * 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_still_closes_the_pool_after_background_work(monkeypatch):
+    held = AsyncHeldClassification()
+    fw = _async_firewall(monkeypatch, held, mode="shadow")
+    client = fw._ensure_client()
+
+    async def operation() -> None:
+        return None
+
+    await fw.protect(operation, text="background")
+    closing = asyncio.ensure_future(fw.aclose())
+    await asyncio.wait_for(held.started.wait(), WAIT_SECONDS)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    held.release.set()
+    await fw.aclose()
+    assert [text for text, _ in held.calls] == ["background"]
+    assert client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_closing_from_a_callback_does_not_wait_for_work_queued_behind_it(monkeypatch):
+    held = AsyncHeldClassification()
+    held.release.set()
+    closed = asyncio.Event()
+
+    async def close_on_first_event(event: ClassifyEvent) -> None:
+        if event.hook == HookLabel.USER_INPUT:
+            await fw.aclose()
+            closed.set()
+
+    fw = _async_firewall(monkeypatch, held, mode="shadow", on_classify=close_on_first_event)
+
+    async def operation() -> str:
+        return "answer"
+
+    await fw.protect(
+        operation,
+        text="prompt",
+        hook=HookLabel.USER_INPUT,
+        metadata={"conversationId": "conversation-1"},
+        output=str,
+    )
+
+    await asyncio.wait_for(closed.wait(), WAIT_SECONDS)
+    with pytest.raises(RuntimeError, match="closed"):
+        fw._ensure_client()
+
+
+def test_concurrent_conversations_keep_their_order_within_the_in_flight_limit(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=URL, mode="shadow", max_concurrent=2, max_queued=64)
+    lock = threading.Lock()
+    sent: dict[str, list[str]] = {}
+    in_flight = 0
+    peak = 0
+    overlap = threading.Barrier(2, timeout=WAIT_SECONDS)
+
+    def classify(text, **options):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            sent.setdefault(options["metadata"]["conversationId"], []).append(text)
+        if text == "0:prompt":
+            overlap.wait()
+        with lock:
+            in_flight -= 1
+        return verdict(mode=options.get("mode"))
+
+    monkeypatch.setattr(fw, "_classify_raw", classify)
+
+    def conversation(name: str) -> None:
+        for turn in range(5):
+            fw.protect(
+                lambda: f"{turn}:answer",
+                text=f"{turn}:prompt",
+                metadata={"conversationId": name},
+                output=str,
+            )
+
+    callers = [threading.Thread(target=conversation, args=(f"conversation-{i}",)) for i in range(8)]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(WAIT_SECONDS)
+    fw.flush()
+
+    expected = [f"{turn}:{part}" for turn in range(5) for part in ("prompt", "answer")]
+    assert sent == {f"conversation-{i}": expected for i in range(8)}
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_async_conversations_keep_their_order_within_the_in_flight_limit(monkeypatch):
+    fw = AsyncFirewall(api_key="sk", api_url=URL, mode="shadow", max_concurrent=2)
+    sent: dict[str, list[str]] = {}
+    in_flight = 0
+    peak = 0
+
+    async def classify(text, **options):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        sent.setdefault(options["metadata"]["conversationId"], []).append(text)
+        await asyncio.sleep(0)
+        in_flight -= 1
+        return verdict(mode=options.get("mode"))
+
+    monkeypatch.setattr(fw, "_classify_raw", classify)
+
+    async def conversation(name: str) -> None:
+        for turn in range(5):
+            async def operation(turn: int = turn) -> str:
+                return f"{turn}:answer"
+
+            await fw.protect(
+                operation, text=f"{turn}:prompt", metadata={"conversationId": name}, output=str
+            )
+
+    await asyncio.gather(*(conversation(f"conversation-{i}") for i in range(8)))
+    await fw.flush()
+
+    expected = [f"{turn}:{part}" for turn in range(5) for part in ("prompt", "answer")]
+    assert sent == {f"conversation-{i}": expected for i in range(8)}
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_close_from_a_callback_waits_for_independent_work_only(monkeypatch):
+    releases = {"prompt": asyncio.Event(), "independent": asyncio.Event(), "answer": asyncio.Event()}
+    started = {text: asyncio.Event() for text in releases}
+    releases["prompt"].set()
+    closed = asyncio.Event()
+
+    async def classify(text, **options):
+        started[text].set()
+        await asyncio.wait_for(releases[text].wait(), WAIT_SECONDS)
+        return verdict(mode=options.get("mode"))
+
+    async def close_on_prompt(event: ClassifyEvent) -> None:
+        if event.text == "prompt":
+            await fw.aclose()
+            closed.set()
+
+    fw = AsyncFirewall(api_key="sk", api_url=URL, mode="shadow", on_classify=close_on_prompt)
+    monkeypatch.setattr(fw, "_classify_raw", classify)
+
+    async def operation() -> str:
+        return "answer"
+
+    await fw.protect(operation, text="independent", metadata={"conversationId": "conversation-2"})
+    await asyncio.wait_for(started["independent"].wait(), WAIT_SECONDS)
+    await fw.protect(
+        operation, text="prompt", metadata={"conversationId": "conversation-1"}, output=str
+    )
+    await asyncio.wait_for(started["prompt"].wait(), WAIT_SECONDS)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not closed.is_set()
+    assert not started["answer"].is_set()
+
+    releases["independent"].set()
+    await asyncio.wait_for(closed.wait(), WAIT_SECONDS)
+    releases["answer"].set()
+    with pytest.raises(RuntimeError, match="closed"):
+        fw._ensure_client()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_flush_leaves_background_work_running_for_the_next_flush(monkeypatch):
+    held = AsyncHeldClassification()
+    fw = _async_firewall(monkeypatch, held, mode="shadow")
+
+    async def operation() -> str:
+        return "answer"
+
+    await asyncio.gather(*(
+        fw.protect(operation, text=f"prompt-{i}", metadata={"conversationId": f"conversation-{i}"}, output=str)
+        for i in range(4)
+    ))
+    flushing = asyncio.ensure_future(fw.flush())
+    await asyncio.wait_for(held.started.wait(), WAIT_SECONDS)
+    flushing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flushing
+
+    held.release.set()
+    await fw.flush()
+    assert sorted(text for text, _ in held.calls) == sorted(
+        [f"prompt-{i}" for i in range(4)] + ["answer"] * 4
+    )
+    assert fw._pending._outstanding == set()

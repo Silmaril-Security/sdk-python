@@ -19,7 +19,12 @@
   `AsyncFirewall.aclose()` drains background classifications. Background
   classifications are also bounded in total at `max_concurrent * max_queued`.
 - Copy `protect()` metadata at call time, and withdraw an unsent Block-mode
-  check when the operation fails or the awaiting task is cancelled.
+  check when the operation fails or the awaiting task is cancelled. A withdrawn
+  check keeps its place in the conversation order, and a cancelled operation
+  is awaited before `protect()` returns.
+- Keep a deferred LangChain block visible to every callback of its run, close
+  the async pool even when the task awaiting `aclose()` is cancelled, and add
+  `flush()` to the async LangChain handler.
 
 ## 0.9.2
 

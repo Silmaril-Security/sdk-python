@@ -16,6 +16,7 @@ from uuid import uuid4
 from silmaril_security.sdk._pending import (
     DEFAULT_MAX_CONCURRENT,
     DEFAULT_MAX_QUEUED,
+    QUEUED,
     AsyncPendingVerdicts,
     conversation_id,
     race,
@@ -190,19 +191,20 @@ class AsyncFirewall:
                 "AsyncFirewall.aclose() cannot be called from inside an active "
                 "classification on the same task; close it after the call returns"
             )
-        await self._pending.drain()
-        await asyncio.shield(self._ensure_close_task())
+        await asyncio.shield(self._ensure_close_task(asyncio.current_task()))
 
-    def _ensure_close_task(self) -> asyncio.Task[None]:
+    def _ensure_close_task(self, caller: asyncio.Task[Any] | None) -> asyncio.Task[None]:
         if self._close_task is None:
             self._closing = True
-            task = asyncio.get_running_loop().create_task(self._drain_and_close())
+            self._pending.closing = True
+            task = asyncio.get_running_loop().create_task(self._drain_and_close(caller))
             task.add_done_callback(self._observe_close_task)
             self._close_task = task
         return self._close_task
 
-    async def _drain_and_close(self) -> None:
+    async def _drain_and_close(self, caller: asyncio.Task[Any] | None) -> None:
         try:
+            await self._pending.drain(caller)
             if self._active_requests:
                 await self._idle.wait()
             if self._owns_client and self._client is not None:
@@ -210,6 +212,7 @@ class AsyncFirewall:
             self._closed = True
         except BaseException:
             self._closing = False
+            self._pending.closing = False
             self._close_task = None
             raise
 
@@ -367,7 +370,7 @@ class AsyncFirewall:
 
     async def flush(self) -> None:
         """Wait for classifications still running in the background."""
-        await self._pending.drain()
+        await self._pending.drain(asyncio.current_task())
 
     def as_async_langchain_handler(self, **options: Any) -> Any:
         """Create an asynchronous LangChain callback handler sharing this client."""
@@ -512,7 +515,7 @@ class AsyncFirewall:
     def _ensure_client(self) -> Any:
         if self._closed:
             raise RuntimeError("AsyncFirewall is closed")
-        if self._closing:
+        if self._closing and not QUEUED.get():
             raise RuntimeError("AsyncFirewall is closing")
         loop = asyncio.get_running_loop()
         if self._loop is None:

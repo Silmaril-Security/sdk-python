@@ -18,7 +18,9 @@ LOG = logging.getLogger("silmaril_security.sdk")
 DEFAULT_MAX_CONCURRENT = 32
 DEFAULT_MAX_QUEUED = 64
 BACKGROUND_RETRIES = 1
+MAX_DEFERRED_SCOPES = 4096
 RETRY_LIMIT: ContextVar[int | None] = ContextVar("silmaril_retry_limit", default=None)
+QUEUED: ContextVar[bool] = ContextVar("silmaril_queued", default=False)
 
 _Verdict = TypeVar("_Verdict")
 _Result = TypeVar("_Result")
@@ -41,9 +43,14 @@ def validate_limits(max_concurrent: int, max_queued: int) -> None:
         raise ValueError(f"Firewall: max_queued must be positive, got {max_queued}")
 
 
-def _report(done: Future[Any] | asyncio.Task[Any]) -> None:
+def _report(done: Future[Any] | asyncio.Future[Any]) -> None:
     if not done.cancelled() and done.exception() is not None:
         LOG.warning("background classification failed", exc_info=done.exception())
+
+
+def _retrieve(done: asyncio.Future[Any]) -> None:
+    if not done.cancelled():
+        done.exception()
 
 
 class _Depths:
@@ -77,7 +84,12 @@ class _Depths:
 
 
 class PendingVerdicts:
-    """Thread-backed classifications sent in order within one conversation."""
+    """Thread-backed classifications sent in order within one conversation.
+
+    Each classification owns a link that later ones wait on. The link completes
+    only when its turn is over, so withdrawing a classification never lets a
+    later one overtake earlier work.
+    """
 
     def __init__(self, max_concurrent: int, max_queued: int) -> None:
         self._executor = ThreadPoolExecutor(
@@ -85,8 +97,8 @@ class PendingVerdicts:
         )
         self._lock = Lock()
         self._depths = _Depths(max_concurrent, max_queued)
-        self._tails: dict[str, Future[Any]] = {}
-        self._outstanding: set[Future[Any]] = set()
+        self._tails: dict[str, Future[None]] = {}
+        self._outstanding: set[Future[None]] = set()
 
     def submit(
         self,
@@ -97,9 +109,10 @@ class PendingVerdicts:
     ) -> Future[_Verdict | None]:
         """Start a classification; a background one is never joined by its caller.
 
-        Cancelling the returned future before it is sent releases its place in the queue.
+        Cancelling the returned future before it is sent withdraws the request.
         """
         pending: Future[_Verdict | None] = Future()
+        link: Future[None] = Future()
         context = copy_context()
         if background:
             context.run(RETRY_LIMIT.set, BACKGROUND_RETRIES)
@@ -110,12 +123,12 @@ class PendingVerdicts:
                 return pending
             previous = self._tails.get(conversation) if conversation is not None else None
             if conversation is not None:
-                self._tails[conversation] = pending
-            self._outstanding.add(pending)
+                self._tails[conversation] = link
+            self._outstanding.add(link)
 
         def start(_: Any = None) -> None:
             self._executor.submit(
-                self._run, context.run, call, pending, conversation, background
+                self._run, context.run, call, pending, link, conversation, background
             )
 
         if previous is None:
@@ -129,30 +142,28 @@ class PendingVerdicts:
         run: Callable[[Callable[[], Any]], Any],
         call: Callable[[], Any],
         pending: Future[Any],
+        link: Future[None],
         conversation: str | None,
         background: bool,
     ) -> None:
-        sending = pending.set_running_or_notify_cancel()
-        outcome, failure = None, None
-        if sending:
-            try:
-                outcome = run(call)
-            except BaseException as exc:
-                failure = exc
-        with self._lock:
-            self._outstanding.discard(pending)
-            self._depths.leave(conversation, background)
-            if conversation is not None and self._tails.get(conversation) is pending:
-                del self._tails[conversation]
-        if not sending:
-            return
-        if failure is None:
-            pending.set_result(outcome)
-        else:
-            pending.set_exception(failure)
+        try:
+            if pending.set_running_or_notify_cancel():
+                try:
+                    outcome = run(call)
+                except BaseException as exc:
+                    pending.set_exception(exc)
+                else:
+                    pending.set_result(outcome)
+        finally:
+            with self._lock:
+                self._outstanding.discard(link)
+                self._depths.leave(conversation, background)
+                if conversation is not None and self._tails.get(conversation) is link:
+                    del self._tails[conversation]
+            link.set_result(None)
 
     def drain(self) -> None:
-        """Wait until every classification started so far has finished."""
+        """Wait until every classification started so far has had its turn."""
         while True:
             with self._lock:
                 outstanding = set(self._outstanding)
@@ -162,14 +173,22 @@ class PendingVerdicts:
 
 
 class AsyncPendingVerdicts:
-    """Task-backed classifications sent in order within one conversation."""
+    """Task-backed classifications sent in order within one conversation.
+
+    Each classification owns a link task that later ones wait on, separate from
+    the verdict its caller holds. Cancelling the verdict withdraws the request
+    without completing the link early, so later work cannot overtake.
+    """
 
     def __init__(self, max_concurrent: int, max_queued: int) -> None:
+        self.closing = False
         self._max_concurrent = max_concurrent
         self._slots: asyncio.Semaphore | None = None
         self._depths = _Depths(max_concurrent, max_queued)
-        self._tails: dict[str, asyncio.Task[Any]] = {}
-        self._outstanding: set[asyncio.Task[Any]] = set()
+        self._tails: dict[str, asyncio.Task[None]] = {}
+        self._outstanding: set[asyncio.Task[None]] = set()
+        self._previous: dict[asyncio.Task[None], asyncio.Task[None]] = {}
+        self._sending: dict[asyncio.Future[Any], asyncio.Task[None]] = {}
 
     def submit(
         self,
@@ -177,57 +196,96 @@ class AsyncPendingVerdicts:
         conversation: str | None = None,
         *,
         background: bool = False,
-    ) -> asyncio.Task[_Verdict | None]:
+    ) -> asyncio.Future[_Verdict | None]:
         """Start a classification; a background one is never joined by its caller.
 
-        Cancelling the returned task releases its place in the queue.
+        Cancelling the returned future withdraws the request.
         """
+        if self.closing:
+            raise RuntimeError("AsyncFirewall is closing")
+        loop = asyncio.get_running_loop()
         if self._slots is None:
             self._slots = asyncio.Semaphore(self._max_concurrent)
+        verdict: asyncio.Future[_Verdict | None] = loop.create_future()
+        verdict.add_done_callback(_report if background else _retrieve)
         if not self._depths.enter(conversation, background):
-            return asyncio.get_running_loop().create_task(_dropped())
+            verdict.set_result(None)
+            return verdict
         previous = self._tails.get(conversation) if conversation is not None else None
-        task = asyncio.get_running_loop().create_task(self._run(call, previous, background))
-        self._outstanding.add(task)
+        link = loop.create_task(self._run(call, previous, verdict, background))
+        self._outstanding.add(link)
+        if previous is not None:
+            self._previous[link] = previous
         if conversation is not None:
-            self._tails[conversation] = task
-        task.add_done_callback(lambda done: self._finish(done, conversation, background))
-        if background:
-            task.add_done_callback(_report)
-        return task
+            self._tails[conversation] = link
+        link.add_done_callback(lambda done: self._finish(done, conversation, background))
+        return verdict
 
     async def _run(
         self,
-        call: Callable[[], Awaitable[_Verdict]],
-        previous: asyncio.Task[Any] | None,
+        call: Callable[[], Awaitable[Any]],
+        previous: asyncio.Task[None] | None,
+        verdict: asyncio.Future[Any],
         background: bool,
-    ) -> _Verdict:
+    ) -> None:
         if background:
             RETRY_LIMIT.set(BACKGROUND_RETRIES)
+        QUEUED.set(True)
         if previous is not None:
             await asyncio.wait({previous})
         assert self._slots is not None
         async with self._slots:
-            return await call()
+            if verdict.done():
+                return
+            sending = asyncio.ensure_future(call())
+            link = asyncio.current_task()
+            assert link is not None
+            self._sending[sending] = link
+            verdict.add_done_callback(lambda done: sending.cancel() if done.cancelled() else None)
+            try:
+                await asyncio.wait({sending})
+            except asyncio.CancelledError:
+                sending.cancel()
+                raise
+            finally:
+                del self._sending[sending]
+            if verdict.done():
+                _retrieve(sending)
+            elif sending.cancelled():
+                verdict.cancel()
+            elif sending.exception() is not None:
+                verdict.set_exception(sending.exception())
+            else:
+                verdict.set_result(sending.result())
 
     def _finish(
-        self, done: asyncio.Task[Any], conversation: str | None, background: bool
+        self, done: asyncio.Task[None], conversation: str | None, background: bool
     ) -> None:
         self._outstanding.discard(done)
+        self._previous.pop(done, None)
         self._depths.leave(conversation, background)
         if conversation is not None and self._tails.get(conversation) is done:
             del self._tails[conversation]
-        if not done.cancelled():
-            done.exception()
+        _retrieve(done)
 
-    async def drain(self) -> None:
-        """Wait until every classification started so far has finished."""
-        while waiting := self._outstanding - {asyncio.current_task()}:
+    def _depends(self, link: asyncio.Task[None] | None, blocker: asyncio.Task[None] | None) -> bool:
+        while link is not None and blocker is not None:
+            if link is blocker:
+                return True
+            link = self._previous.get(link)
+        return False
+
+    async def drain(self, caller: asyncio.Task[Any] | None = None) -> None:
+        """Wait until every classification started so far has had its turn.
+
+        Work queued behind a classification that ``caller`` is running inside,
+        such as an ``on_classify`` callback, cannot finish first and is skipped.
+        """
+        blocker = self._sending.get(caller) if caller is not None else None
+        while waiting := {
+            link for link in self._outstanding if not self._depends(link, blocker)
+        }:
             await asyncio.wait(waiting)
-
-
-async def _dropped() -> None:
-    return None
 
 
 async def race(
@@ -237,8 +295,9 @@ async def race(
 ) -> tuple[_Verdict, _Result | None]:
     """Run an operation beside its verdict and cancel it once the verdict stops it.
 
-    A caller that is cancelled, or an operation that fails, also cancels a verdict
-    that is still waiting, so it leaves the conversation queue.
+    A caller that is cancelled, or an operation that fails, withdraws a verdict
+    that is still waiting. A cancelled operation is awaited before returning, so
+    its cleanup finishes and its outcome is collected.
     """
     verdict_task = asyncio.ensure_future(pending)
     running = asyncio.ensure_future(operation)
@@ -250,8 +309,9 @@ async def race(
         verdict = await verdict_task
         return verdict, None if stops(verdict) else result
     finally:
-        running.cancel()
         verdict_task.cancel()
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
 
 
 class Deferred:
@@ -263,7 +323,27 @@ class Deferred:
 
     def add(self, scope: str, pending: Any) -> None:
         with self._lock:
+            while scope not in self._scopes and len(self._scopes) >= MAX_DEFERRED_SCOPES:
+                del self._scopes[next(iter(self._scopes))]
             self._scopes.setdefault(scope, []).append(pending)
+
+    def pending(self, scope: str) -> list[Any]:
+        """Return the scope's verdicts, which stay visible to every joining callback."""
+        with self._lock:
+            return list(self._scopes.get(scope, ()))
+
+    def settled(self, scope: str) -> None:
+        """Forget verdicts that passed; a failed one stays until the scope is taken."""
+        with self._lock:
+            remaining = [
+                pending
+                for pending in self._scopes.get(scope, ())
+                if not pending.done() or pending.cancelled() or pending.exception() is not None
+            ]
+            if remaining:
+                self._scopes[scope] = remaining
+            else:
+                self._scopes.pop(scope, None)
 
     def take(self, scope: str) -> list[Any]:
         with self._lock:
@@ -271,12 +351,9 @@ class Deferred:
 
     def failure(self, scope: str) -> BaseException | None:
         """Return the failure of a finished verdict without waiting for the rest."""
-        with self._lock:
-            finished = [
-                pending
-                for pending in self._scopes.get(scope, ())
-                if pending.done() and not pending.cancelled()
-            ]
+        finished = [
+            pending for pending in self.pending(scope) if pending.done() and not pending.cancelled()
+        ]
         return next(
             (pending.exception() for pending in finished if pending.exception() is not None),
             None,

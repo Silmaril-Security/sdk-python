@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from uuid import uuid4
 
 import pytest
@@ -122,6 +123,36 @@ def test_parallel_tool_result_is_joined_at_the_next_model_end(monkeypatch):
     assert all(options["metadata"]["conversationId"] == "conversation-1" for _, options in held.calls)
 
 
+def test_parallel_block_stays_visible_to_sibling_callbacks_until_the_run_ends(monkeypatch):
+    held = HeldClassification("MALICIOUS")
+    fw = _firewall(monkeypatch, held)
+    handler = fw.as_langchain_handler(parallel=True)
+    graph, model, tool = uuid4(), uuid4(), uuid4()
+    handler.on_chain_start({}, {}, run_id=graph)
+    handler.on_chat_model_start(serialized={}, messages=USER, run_id=model, parent_run_id=graph)
+    assert held.started.wait(WAIT_SECONDS)
+    joined: list[BaseException] = []
+
+    def model_end() -> None:
+        try:
+            handler.on_llm_end(ANSWER, run_id=model, parent_run_id=graph)
+        except FirewallBlockedException as blocked:
+            joined.append(blocked)
+
+    joining = threading.Thread(target=model_end)
+    joining.start()
+    held.release.set()
+    with pytest.raises(FirewallBlockedException) as sibling:
+        handler.on_tool_start({"name": "send_email"}, "body", run_id=tool, parent_run_id=graph)
+    joining.join(WAIT_SECONDS)
+
+    assert sibling.value.hook == HookLabel.USER_INPUT
+    assert [blocked.hook for blocked in joined] == [HookLabel.USER_INPUT]
+    assert held.hooks == [HookLabel.USER_INPUT]
+    handler.on_chain_error(RuntimeError("run failed"), run_id=graph)
+    assert handler._deferred.pending(str(graph)) == []
+
+
 def test_failed_run_leaves_no_deferred_verdicts(monkeypatch):
     held = HeldClassification("MALICIOUS")
     held.release.set()
@@ -222,3 +253,86 @@ async def test_async_protected_model_generates_while_its_input_is_classified(mon
     assert result.content == "done"
     assert held.hooks == [HookLabel.USER_INPUT, HookLabel.LLM_OUTPUT]
     await fw.flush()
+
+
+@pytest.mark.asyncio
+async def test_async_handler_flush_waits_for_background_checks_of_a_sync_client(monkeypatch):
+    held = AsyncHeldClassification("MALICIOUS")
+    events = []
+    fw = Firewall(api_key="sk", api_url=URL, mode="shadow")
+
+    async def classify(firewall, text, **options):
+        return await held(text, **options)
+
+    monkeypatch.setattr("silmaril_security.sdk.langchain._async_classify_raw", classify)
+    handler = fw.as_async_langchain_handler(on_classify=events.append)
+
+    await handler.on_chat_model_start(serialized={}, messages=USER, run_id=uuid4())
+    assert events == []
+
+    held.release.set()
+    await handler.flush()
+    assert [event.blocked for event in events] == [True]
+
+
+@pytest.mark.asyncio
+async def test_async_sibling_callbacks_join_the_same_deferred_block(monkeypatch):
+    held = AsyncHeldClassification("MALICIOUS")
+    fw = AsyncFirewall(api_key="sk", api_url=URL)
+    monkeypatch.setattr(fw, "_classify_raw", held)
+    handler = fw.as_async_langchain_handler(parallel=True)
+    graph, model, first_tool, second_tool = uuid4(), uuid4(), uuid4(), uuid4()
+    await handler.on_chain_start({}, {}, run_id=graph)
+    await handler.on_chat_model_start(serialized={}, messages=USER, run_id=model, parent_run_id=graph)
+    await asyncio.wait_for(held.started.wait(), WAIT_SECONDS)
+
+    joining = asyncio.gather(
+        handler.on_llm_end(ANSWER, run_id=model, parent_run_id=graph),
+        handler.on_tool_start({"name": "send_email"}, "body", run_id=first_tool, parent_run_id=graph),
+        handler.on_tool_start({"name": "delete_records"}, "all", run_id=second_tool, parent_run_id=graph),
+        return_exceptions=True,
+    )
+    for _ in range(5):
+        await asyncio.sleep(0)
+    held.release.set()
+    outcomes = await joining
+
+    assert [type(outcome) for outcome in outcomes] == [FirewallBlockedException] * 3
+    assert {outcome.hook for outcome in outcomes} == {HookLabel.USER_INPUT}
+    assert held.hooks == [HookLabel.USER_INPUT]
+    await handler.on_chain_error(RuntimeError("run failed"), run_id=graph)
+    assert handler._deferred.pending(str(graph)) == []
+    await fw.flush()
+
+
+def test_many_sibling_threads_join_the_same_deferred_block(monkeypatch):
+    held = HeldClassification("MALICIOUS")
+    fw = _firewall(monkeypatch, held)
+    handler = fw.as_langchain_handler(parallel=True)
+    graph, model = uuid4(), uuid4()
+    handler.on_chain_start({}, {}, run_id=graph)
+    handler.on_chat_model_start(serialized={}, messages=USER, run_id=model, parent_run_id=graph)
+    assert held.started.wait(WAIT_SECONDS)
+    ready = threading.Barrier(9, timeout=WAIT_SECONDS)
+    outcomes: list[BaseException | None] = []
+
+    def tool_start() -> None:
+        ready.wait()
+        try:
+            handler.on_tool_start({"name": "send_email"}, "body", run_id=uuid4(), parent_run_id=graph)
+        except FirewallBlockedException as blocked:
+            outcomes.append(blocked)
+        else:
+            outcomes.append(None)
+
+    siblings = [threading.Thread(target=tool_start) for _ in range(8)]
+    for sibling in siblings:
+        sibling.start()
+    ready.wait()
+    held.release.set()
+    for sibling in siblings:
+        sibling.join(WAIT_SECONDS)
+
+    assert len(outcomes) == 8
+    assert all(isinstance(outcome, FirewallBlockedException) for outcome in outcomes)
+    assert held.hooks == [HookLabel.USER_INPUT]
