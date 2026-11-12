@@ -112,6 +112,18 @@ class ThreadRuns:
             result["conversationId"] = identity
         return result
 
+    def root(self, run_id: Any) -> str:
+        """Return the outermost tracked ancestor, which scopes deferred verdicts."""
+        with self._lock:
+            run = str(run_id)
+            visited = {run}
+            while (parent := self._runs.get(run, (None, None, False))[1]) in self._runs:
+                if parent in visited:
+                    break
+                visited.add(parent)
+                run = parent
+            return run
+
     def clear(self) -> None:
         with self._lock:
             self._runs.clear()

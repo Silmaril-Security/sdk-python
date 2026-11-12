@@ -10,11 +10,21 @@ import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from email.utils import parsedate_to_datetime
-from typing import Any, cast
+from functools import cached_property, partial
+from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 import requests
 
+from silmaril_security.sdk._pending import (
+    DEFAULT_MAX_CONCURRENT,
+    DEFAULT_MAX_QUEUED,
+    RETRY_LIMIT,
+    PendingVerdicts,
+    conversation_id,
+    snapshot,
+    validate_limits,
+)
 from silmaril_security.sdk._version import VERSION
 from silmaril_security.sdk.exceptions import (
     BatchFirewallBlockedException,
@@ -51,6 +61,7 @@ _MAX_BACKOFF_SECONDS = 30.0
 _MAX_ERROR_BODY_BYTES = 1 << 16
 _LEGACY_RESPONSE_MODE: FirewallMode = "block"
 _MISSING = object()
+_Result = TypeVar("_Result")
 
 
 def _validate_mode(value: Any) -> FirewallMode:
@@ -269,6 +280,15 @@ def _sdk_metadata(
     return payload
 
 
+def _retry_budget(max_retries: int) -> int:
+    limit = RETRY_LIMIT.get()
+    return max_retries if limit is None else min(max_retries, limit)
+
+
+def _enforces(mode: FirewallMode | None) -> bool:
+    return (mode or _LEGACY_RESPONSE_MODE) == "block"
+
+
 def _retry_after_seconds(value: str | None) -> float | None:
     if not value:
         return None
@@ -460,6 +480,8 @@ class Firewall:
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         session: requests.Session | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+        max_queued: int = DEFAULT_MAX_QUEUED,
     ) -> None:
         if not api_key:
             raise ValueError("Firewall: api_key is required")
@@ -469,6 +491,9 @@ class Firewall:
             raise ValueError(f"Firewall: timeout must be positive and finite, got {timeout}")
         if max_retries < 0:
             raise ValueError(f"Firewall: max_retries must be non-negative, got {max_retries}")
+        validate_limits(max_concurrent, max_queued)
+        self.max_concurrent = max_concurrent
+        self.max_queued = max_queued
         self.api_key = api_key
         self.api_url = api_url
         self.timeout = timeout
@@ -576,6 +601,63 @@ class Firewall:
             raise BatchFirewallBlockedException(blocked=blocked, results=results)
         return results
 
+    def protect(
+        self,
+        operation: Callable[[], _Result],
+        *,
+        text: str,
+        hook: HookLabel | str | None = None,
+        tool_name: str | None = None,
+        metadata: ClassificationMetadata | None = None,
+        governance: GovernanceContext | None = None,
+        mode: FirewallMode | None = None,
+        review: ReviewLevel | None = None,
+        request_id: str | None = None,
+        output: Callable[[_Result], str] | None = None,
+    ) -> _Result:
+        """Run an operation while its input is classified and withhold a blocked result."""
+        metadata = snapshot(metadata)
+        classify = partial(self.classify, metadata=metadata, mode=mode, review=review)
+        conversation = conversation_id(metadata)
+        enforcing = _enforces(self._effective_mode(mode, None))
+        pending = self._pending.submit(
+            partial(
+                classify,
+                text,
+                hook=hook,
+                tool_name=tool_name,
+                governance=governance,
+                request_id=request_id,
+            ),
+            conversation,
+            background=not enforcing,
+        )
+        try:
+            result = operation()
+        except BaseException:
+            if enforcing:
+                pending.cancel()
+            raise
+        if enforcing:
+            pending.result()
+        if output is not None:
+            generated = self._pending.submit(
+                partial(classify, output(result), hook=HookLabel.LLM_OUTPUT),
+                conversation,
+                background=not enforcing,
+            )
+            if enforcing:
+                generated.result()
+        return result
+
+    def flush(self) -> None:
+        """Wait for classifications still running in the background."""
+        self._pending.drain()
+
+    @cached_property
+    def _pending(self) -> PendingVerdicts:
+        return PendingVerdicts(self.max_concurrent, self.max_queued)
+
     def as_langchain_handler(self, **options: Any) -> Any:
         """Create a synchronous LangChain callback handler."""
         from silmaril_security.sdk.langchain import SilmarilFirewallHandler
@@ -671,7 +753,8 @@ class Firewall:
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload)
-        for attempt in range(self.max_retries + 1):
+        max_retries = _retry_budget(self.max_retries)
+        for attempt in range(max_retries + 1):
             try:
                 response = self._session.post(
                     self.api_url,
@@ -685,12 +768,12 @@ class Firewall:
                     stream=True,
                 )
             except requests.RequestException:
-                if attempt < self.max_retries:
+                if attempt < max_retries:
                     self._sleep_before_retry(attempt, None)
                     continue
                 raise
 
-            if response.status_code in _RETRYABLE_STATUS_CODES and attempt < self.max_retries:
+            if response.status_code in _RETRYABLE_STATUS_CODES and attempt < max_retries:
                 _close_response(response)
                 self._sleep_before_retry(attempt, response)
                 continue

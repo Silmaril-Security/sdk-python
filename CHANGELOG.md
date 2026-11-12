@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.10.0
+
+- Classify model output by default in the LangChain handlers: `on_llm_end` is
+  now part of `DEFAULT_HOOKS`. Pass `hooks=` to keep the previous set.
+- Add `Firewall.protect()` and `AsyncFirewall.protect()`, which run a call
+  while its input is classified and withhold the result of a blocked input.
+  `AsyncFirewall` cancels the call when the block arrives first.
+- Add a `parallel` option to the LangChain handlers,
+  `protect_langchain_runnable()`, and the Deep Agents middleware. Input and
+  tool-result checks run beside the model call; tool-call and model-output
+  checks still wait for their verdict.
+- Classify in the background in Shadow mode for the LangChain handlers and
+  Deep Agents middleware unless `fail_open=False`.
+- Send classifications that share `metadata.conversationId` in the order they
+  were started, including the Block-mode `protect()` output check. Add
+  `max_concurrent` and `max_queued` client options and `flush()`;
+  `AsyncFirewall.aclose()` drains background classifications. Background
+  classifications are also bounded in total at `max_concurrent * max_queued`.
+- Copy `protect()` metadata at call time, and withdraw an unsent Block-mode
+  check when the operation fails or the awaiting task is cancelled. A withdrawn
+  check keeps its place in the conversation order, and a cancelled operation
+  is awaited before `protect()` returns.
+- Keep a deferred LangChain block visible to every callback of its run, close
+  the async pool even when the task awaiting `aclose()` is cancelled, and add
+  `flush()` to the async LangChain handler.
+
 ## 0.9.2
 
 - Reject zero, negative, and non-finite asynchronous request timeouts at

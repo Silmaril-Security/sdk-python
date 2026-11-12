@@ -240,6 +240,7 @@ def test_background_notification_is_filtered_before_newer_user_message(monkeypat
         return AIMessage("done")
 
     middleware.wrap_model_call(request, handler)
+    fw.flush()
     assert received[0].content == (SAFE_TOOL_MESSAGE if mode == "block" else note.content)
     assert note.content == "unsafe remote notification"
     assert any(options["hook"] == HookLabel.TOOL_RESPONSE for _, options in seen)

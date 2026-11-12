@@ -15,6 +15,7 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} (${{ matrix.profile }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +99,7 @@ jobs:
   minimum-integrations:
     name: Minimum ${{ matrix.profile }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -128,16 +130,16 @@ jobs:
       - name: Install minimum supported integration
         run: |
           python -m pip install -e ".[${{ matrix.extras }}]" ${{ matrix.dependencies }} \
-            "pytest>=7.4.0" "pytest-asyncio>=0.23.0" ${{ matrix.build_tools }}
+            "pytest>=7.4.0" "pytest-asyncio>=0.23.0" "pytest-timeout>=2.2.0" ${{ matrix.build_tools }}
           python -m pip check
       - name: Require the selected integration
         run: python -c "import ${{ matrix.module }}"
       - name: Exercise native thread integration
-        run: python -m pytest tests/test_package_metadata.py tests/test_langchain.py tests/test_thread_identity.py -q
+        run: python -m pytest tests/test_package_metadata.py tests/test_langchain.py tests/test_thread_identity.py tests/test_parallel.py tests/test_parallel_langchain.py -q
 
       - name: Test Deep Agents remote protocol minimum
         if: matrix.profile == 'deepagents'
-        run: python -m pytest tests/test_deepagents.py tests/test_deepagents_remote.py -q
+        run: python -m pytest tests/test_deepagents.py tests/test_deepagents_remote.py tests/test_parallel_deepagents.py -q
 
       - name: Build minimum package
         run: python -m build

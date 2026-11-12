@@ -236,6 +236,7 @@ async def test_async_langchain_handler_supports_async_callback(monkeypatch):
         messages=[[{"role": "user", "content": "hello"}]],
         run_id=uuid4(),
     )
+    await handler._pending.drain()
 
     assert len(events) == 1
     assert events[0].blocked is True

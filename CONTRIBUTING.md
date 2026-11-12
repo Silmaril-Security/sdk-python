@@ -32,7 +32,7 @@ python -m pip install --upgrade pip
 ```
 
 Install the extras that CI installs for your interpreter. The `dev` extra
-provides `build`, `pytest`, `pytest-asyncio`, `ruff`, and `twine`.
+provides `build`, `pytest`, `pytest-asyncio`, `pytest-timeout`, `ruff`, and `twine`.
 
 ```sh
 # Python 3.10

@@ -144,6 +144,16 @@ if sys.version_info >= (3, 11):
         assert len(payloads) > before
         assert all(p["metadata"].get("conversationId") == thread for p in payloads[before:])
 
+# Parallel protection ships in the wheel and keeps the same wire identity.
+before = len(payloads)
+assert fw.protect(lambda: "answer", text="safe", metadata={"conversationId": "package-protect"}, output=str) == "answer"
+protect_langchain_runnable(fw, model, parallel=True).invoke(
+    "safe", config={"configurable": {"thread_id": "package-protect"}}
+)
+fw.flush()
+assert len(payloads) - before == 4
+assert all(p["metadata"]["conversationId"] == "package-protect" for p in payloads[before:])
+
 assert all(p["metadata"]["silmaril"]["sdk_version"] == __version__ for p in payloads)
 assert len({p["metadata"]["silmaril"]["request_id"] for p in payloads}) == len(payloads)
 print("Installed SDK native thread identity verified")

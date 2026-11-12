@@ -9,9 +9,20 @@ import inspect
 import logging
 import math
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any
+from functools import partial
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import uuid4
 
+from silmaril_security.sdk._pending import (
+    DEFAULT_MAX_CONCURRENT,
+    DEFAULT_MAX_QUEUED,
+    QUEUED,
+    AsyncPendingVerdicts,
+    conversation_id,
+    race,
+    snapshot,
+    validate_limits,
+)
 from silmaril_security.sdk.exceptions import (
     BatchFirewallBlockedException,
     FirewallBlockedException,
@@ -28,9 +39,11 @@ from silmaril_security.sdk.firewall import (
     _block_result_from_json,
     _effective_mode,
     _effective_review,
+    _enforces,
     _new_classify_event,
     _require_review_acknowledgement,
     _retry_after_seconds,
+    _retry_budget,
     _single_payload,
     _validate_mode,
     _validate_review,
@@ -50,6 +63,7 @@ if TYPE_CHECKING:
     import httpx
 
 LOG = logging.getLogger("silmaril_security.sdk")
+_Result = TypeVar("_Result")
 
 
 async def _aread_capped_error_body(
@@ -93,6 +107,8 @@ class AsyncFirewall:
         on_classify: Callable[[ClassifyEvent], None | Awaitable[None]] | None = None,
         http_client: httpx.AsyncClient | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+        max_queued: int = DEFAULT_MAX_QUEUED,
     ) -> None:
         try:
             import httpx
@@ -110,6 +126,7 @@ class AsyncFirewall:
             raise ValueError(f"Firewall: timeout must be positive and finite, got {timeout}")
         if max_retries < 0:
             raise ValueError(f"Firewall: max_retries must be non-negative, got {max_retries}")
+        validate_limits(max_concurrent, max_queued)
 
         self.api_key = api_key
         self.api_url = api_url
@@ -134,6 +151,7 @@ class AsyncFirewall:
         self._idle = asyncio.Event()
         self._idle.set()
         self._close_task: asyncio.Task[None] | None = None
+        self._pending = AsyncPendingVerdicts(max_concurrent, max_queued)
 
     async def __aenter__(self) -> AsyncFirewall:
         self._ensure_client()
@@ -173,11 +191,16 @@ class AsyncFirewall:
                 "AsyncFirewall.aclose() cannot be called from inside an active "
                 "classification on the same task; close it after the call returns"
             )
-        await asyncio.shield(self._ensure_close_task())
+        blocker = self._pending.skip(asyncio.current_task())
+        try:
+            await asyncio.shield(self._ensure_close_task())
+        finally:
+            self._pending.unskip(blocker)
 
     def _ensure_close_task(self) -> asyncio.Task[None]:
         if self._close_task is None:
             self._closing = True
+            self._pending.closing = True
             task = asyncio.get_running_loop().create_task(self._drain_and_close())
             task.add_done_callback(self._observe_close_task)
             self._close_task = task
@@ -185,6 +208,7 @@ class AsyncFirewall:
 
     async def _drain_and_close(self) -> None:
         try:
+            await self._pending.drain(closing=True)
             if self._active_requests:
                 await self._idle.wait()
             if self._owns_client and self._client is not None:
@@ -192,6 +216,7 @@ class AsyncFirewall:
             self._closed = True
         except BaseException:
             self._closing = False
+            self._pending.closing = False
             self._close_task = None
             raise
 
@@ -300,6 +325,57 @@ class AsyncFirewall:
             raise BatchFirewallBlockedException(blocked=blocked, results=results)
         return results
 
+    async def protect(
+        self,
+        operation: Callable[[], Awaitable[_Result]],
+        *,
+        text: str,
+        hook: HookLabel | str | None = None,
+        tool_name: str | None = None,
+        metadata: ClassificationMetadata | None = None,
+        governance: GovernanceContext | None = None,
+        mode: FirewallMode | None = None,
+        review: ReviewLevel | None = None,
+        request_id: str | None = None,
+        output: Callable[[_Result], str] | None = None,
+    ) -> _Result:
+        """Run an operation while its input is classified and withhold a blocked result."""
+        metadata = snapshot(metadata)
+        classify = partial(self.classify, metadata=metadata, mode=mode, review=review)
+        conversation = conversation_id(metadata)
+        enforcing = _enforces(self._effective_mode(mode, None))
+        pending = self._pending.submit(
+            partial(
+                classify,
+                text,
+                hook=hook,
+                tool_name=tool_name,
+                governance=governance,
+                request_id=request_id,
+            ),
+            conversation,
+            background=not enforcing,
+        )
+        if not enforcing:
+            result = await operation()
+            if output is not None:
+                self._pending.submit(
+                    partial(classify, output(result), hook=HookLabel.LLM_OUTPUT),
+                    conversation,
+                    background=True,
+                )
+            return result
+        _, result = await race(pending, operation())
+        if output is not None:
+            await self._pending.submit(
+                partial(classify, output(result), hook=HookLabel.LLM_OUTPUT), conversation
+            )
+        return result
+
+    async def flush(self) -> None:
+        """Wait for classifications still running in the background."""
+        await self._pending.drain(asyncio.current_task())
+
     def as_async_langchain_handler(self, **options: Any) -> Any:
         """Create an asynchronous LangChain callback handler sharing this client."""
         from silmaril_security.sdk.langchain import AsyncSilmarilFirewallHandler
@@ -369,8 +445,9 @@ class AsyncFirewall:
         client = self._ensure_client()
         headers = {"x-api-key": self.api_key, "content-type": "application/json"}
         self._begin_request()
+        max_retries = _retry_budget(self.max_retries)
         try:
-            for attempt in range(self.max_retries + 1):
+            for attempt in range(max_retries + 1):
                 request = client.build_request(
                     "POST",
                     self.api_url,
@@ -391,7 +468,7 @@ class AsyncFirewall:
                     try:
                         if (
                             response.status_code in _RETRYABLE_STATUS_CODES
-                            and attempt < self.max_retries
+                            and attempt < max_retries
                         ):
                             retry_after = response.headers.get("Retry-After")
                             should_retry = True
@@ -411,7 +488,7 @@ class AsyncFirewall:
                     finally:
                         await response.aclose()
                 except self._httpx.HTTPError:
-                    if attempt < self.max_retries:
+                    if attempt < max_retries:
                         await self._sleep_before_retry(attempt, None)
                         continue
                     raise
@@ -442,7 +519,7 @@ class AsyncFirewall:
     def _ensure_client(self) -> Any:
         if self._closed:
             raise RuntimeError("AsyncFirewall is closed")
-        if self._closing:
+        if self._closing and not QUEUED.get():
             raise RuntimeError("AsyncFirewall is closing")
         loop = asyncio.get_running_loop()
         if self._loop is None:

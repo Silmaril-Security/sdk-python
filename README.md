@@ -28,6 +28,7 @@ This SDK provides the low-level Python interface for that workflow:
 - On individual `classify()` calls, preserve exact `metadata.conversationId`
   as sequence identity and add one event ID.
 - Retry transient API Gateway and model-serving failures.
+- Optionally classify in parallel with the model call it protects.
 - Optionally attach the firewall to LangChain callback flows.
 
 ## Install
@@ -41,7 +42,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.9.1
+pip install silmaril-security-sdk==0.10.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -222,6 +223,8 @@ Firewall(
     on_classify: Callable[[ClassifyEvent], None] | None = None,
     session: requests.Session | None = None,       # optional custom requests session
     max_retries: int = 5,
+    max_concurrent: int = 32,                      # classifications in flight beside the host flow
+    max_queued: int = 64,                          # unjoined background checks per conversation
 )
 
 AsyncFirewall(
@@ -235,6 +238,8 @@ AsyncFirewall(
     on_classify: Callable[[ClassifyEvent], Awaitable[None] | None] | None = None,
     http_client: httpx.AsyncClient | None = None,  # caller-owned when provided
     max_retries: int = 5,
+    max_concurrent: int = 32,
+    max_queued: int = 64,
 )
 ```
 
@@ -598,7 +603,63 @@ For conversation-aware checks, send complete events through ordered individual
 before sending the next event for that conversation. Concurrent `classify()`
 calls are appropriate for independent events or different conversations.
 
+## Parallel Classification
+
+`protect()` runs your call while its input is classified, instead of waiting
+for the verdict first. It takes the same options as `classify()` and returns
+your call's result:
+
+```python
+answer = fw.protect(
+    lambda: call_model(prompt),
+    text=prompt,
+    hook=HookLabel.USER_INPUT,
+    metadata={"conversationId": conversation_id},
+    output=lambda response: response.text,
+)
+
+answer = await async_fw.protect(lambda: call_model(prompt), text=prompt, hook=HookLabel.USER_INPUT)
+```
+
+In Block mode the result is withheld until the verdict arrives, and a block
+raises `FirewallBlockedException`. `AsyncFirewall` also cancels the call when
+the block lands first; a synchronous call cannot be interrupted, so its result
+is discarded. In Shadow and Warn the result is returned immediately and the
+classification finishes in the background. The optional `output` extractor
+classifies the result as `llm_output` before it is returned.
+
+Use `protect()` only for calls whose effect can be discarded. Classify the
+arguments of a tool that writes with `classify()` before running it.
+
+Classifications that share `metadata.conversationId` are sent in the order
+they were started, so parallel checks keep the backend sequence intact. That
+includes the Block-mode `output` check, which takes its turn in the same
+queue. `protect()` copies `metadata` when it is called, so later changes to
+that object do not reach a classification that is still waiting.
+`max_concurrent` bounds how many run at once. A background classification
+retries once. It is dropped with a warning when its conversation already has
+`max_queued` unjoined checks, or when `max_concurrent * max_queued` background
+classifications are waiting across all conversations, including those without
+a `metadata.conversationId`. If the operation raises, or the task awaiting
+`AsyncFirewall.protect()` is cancelled, a Block-mode check that has not been
+sent is withdrawn and the async operation is cancelled and awaited. A
+withdrawn check keeps its place in line, so later checks for that conversation
+still wait for earlier ones. `fw.flush()` waits for background
+classifications to finish, for example before a serverless handler returns;
+`AsyncFirewall.aclose()` does the same before it closes, and still closes the
+pool if the task awaiting it is cancelled. Calling `aclose()` from
+`on_classify` does not wait for classifications queued behind the one that
+invoked the callback. `on_classify` runs on a worker thread for a
+classification started by the synchronous `protect()`.
+
 ## Migration Notes
+
+Version `0.10.0` classifies model output by default in the LangChain handlers:
+`on_llm_end` joins `on_llm_start`, `on_chat_model_start`, `on_tool_start`, and
+`on_tool_end` in `DEFAULT_HOOKS`. Pass `hooks=` without `FirewallHook.LLM_END`
+to keep the previous set. Shadow-mode handlers and Deep Agents middleware now
+classify in the background unless `fail_open=False`, so `on_classify` can run
+after the hook returns.
 
 Version `0.8.0` removes the `conversation_id` option from framework handlers
 and middleware. Set only the framework’s native `configurable.thread_id`
@@ -649,9 +710,10 @@ agent.invoke("Another conversation", config={
 
 The LangChain handler is fail-open by default: infrastructure errors are logged
 and the LLM call proceeds. Set `fail_open=False` to make API errors bubble up.
-Default hooks are `on_llm_start`, `on_chat_model_start`, `on_tool_start`, and
-`on_tool_end`. `on_llm_end`, `on_retriever_start`, and `on_retriever_end` run
-only when `hooks=` includes them. `include_tool=False` skips tool start and
+Default hooks are `on_llm_start`, `on_chat_model_start`, `on_tool_start`,
+`on_tool_end`, and `on_llm_end`. `on_retriever_start` and `on_retriever_end`
+run only when `hooks=` includes them. With streaming, `on_llm_end` runs after
+tokens are emitted: a block stops the run and cannot recall them. `include_tool=False` skips tool start and
 end even if those hooks are enabled. `include_system` is stored and unused
 when the handler selects text. Model start classifies the latest user message
 and leaves earlier tool messages for the tool hooks. Each callback gets a
@@ -668,6 +730,26 @@ Deep Agents users should use its protected constructor below. If no native ID
 is available, identity is omitted and checks continue independently. Handlers
 classify without a `GovernanceContext`. A governance `"block"` on the response
 still raises `FirewallBlockedException` in Block mode.
+
+Pass `parallel=True` to a handler or to `protect_langchain_runnable()` to run
+checks beside the model call:
+
+```python
+agent = protect_langchain_runnable(fw, model, parallel=True)
+handler = fw.as_langchain_handler(parallel=True)
+```
+
+The `user_input` and `tool_response` checks then start without waiting and are
+joined when the model call ends, before a tool starts, and when the run ends.
+The `tool_call` and `llm_output` checks always wait for their verdict. A block
+that has already arrived is raised at the next callback, including the next
+streamed token. Callbacks cannot cancel a model call, so a late block discards
+its output. A deferred block stays visible to every callback of that run until
+the run ends, so concurrent branches all stop on it. In Shadow mode every check
+runs in the background and nothing is joined, unless `fail_open=False` requires
+each classification to succeed. `fw.flush()` waits for those checks; an async
+handler created from a synchronous `Firewall` tracks its own, so await
+`handler.flush()` there.
 
 Async LangChain:
 
@@ -763,6 +845,13 @@ Classification errors allow model and tool execution by default; set
 `fail_open=False` in `middleware_options` to require a successful
 classification. The middleware classifies with `governance=None`. A governance
 `"block"` on the response is still enforced in Block mode.
+
+Set `middleware_options={"parallel": True}` to classify user input while the
+model call runs. A blocked input replaces the response, and async execution
+cancels the model call. Tool calls and tool results still wait for their
+verdict, because a denied result is replaced before it enters agent state, and
+the input check waits again once `max_blocked_attempts` is reached. Shadow
+mode classifies in the background unless `fail_open=False`.
 
 ### Remote subagents
 

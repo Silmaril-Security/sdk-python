@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
@@ -11,6 +12,7 @@ from functools import partial
 from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
+from silmaril_security.sdk._pending import AsyncPendingVerdicts, Deferred, conversation_id
 from silmaril_security.sdk._thread_identity import (
     ThreadRuns,
     reject_conversation_options,
@@ -53,6 +55,7 @@ except ImportError as exc:  # pragma: no cover - exercised by packaging consumer
     ) from exc
 
 LOG = logging.getLogger("silmaril_security.sdk.langchain")
+_DEFERRED_LABELS = frozenset({HookLabel.USER_INPUT, HookLabel.TOOL_RESPONSE})
 _Input = TypeVar("_Input")
 _Output = TypeVar("_Output")
 
@@ -79,6 +82,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         shadow_mode: bool | None = None,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
         logger: logging.Logger | None = None,
+        parallel: bool = False,
         **removed_options: Any,
     ) -> None:
         reject_conversation_options(removed_options)
@@ -86,6 +90,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             raise TypeError(f"Unexpected options: {sorted(removed_options)}")
         super().__init__()
         self._thread_runs = ThreadRuns()
+        self._deferred = Deferred()
         self.firewall = firewall
         self._enabled_hooks = resolve_hooks(hooks)
         self.include_system = include_system
@@ -93,24 +98,30 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         self.fail_open = fail_open
         self.mode = firewall._effective_mode(mode, shadow_mode)
         self.shadow_mode = self.mode == "shadow"
+        self.background = self.shadow_mode and fail_open
+        self.parallel = parallel
         self.on_classify = on_classify
         self.logger = logger or LOG
 
     @track_callback(start=True)
     def on_chain_start(self, serialized: Any, inputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        pass
+        self._check(run_id)
 
     @track_callback(start=False)
     def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        pass
+        self._settle_root(run_id)
 
     @track_callback(start=False)
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        pass
+        if self._thread_runs.root(run_id) == str(run_id):
+            self._deferred.take(str(run_id))
 
     on_llm_error = on_chain_error
     on_tool_error = on_chain_error
     on_retriever_error = on_chain_error
+
+    def on_llm_new_token(self, token: str, *, run_id: UUID, **kwargs: Any) -> None:
+        self._check(run_id)
 
     def _fire_on_classify(self, event: ClassifyEvent) -> None:
         if self.on_classify is None:
@@ -120,6 +131,34 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         except Exception:
             self.logger.warning("on_classify callback raised", exc_info=True)
 
+    def _check(self, run_id: UUID | str) -> None:
+        """Raise a deferred block that has already landed, without waiting for the rest."""
+        scope = self._thread_runs.root(run_id)
+        failure = self._deferred.failure(scope)
+        if failure is not None:
+            self._forget_root(scope, run_id)
+            raise failure
+
+    def _forget_root(self, scope: str, run_id: UUID | str) -> None:
+        """A failed verdict stays visible to sibling callbacks until its root run ends."""
+        if scope == str(run_id):
+            self._deferred.take(scope)
+
+    def _settle(self, run_id: UUID | str) -> None:
+        """Wait for every verdict deferred by this execution before it proceeds."""
+        scope = self._thread_runs.root(run_id)
+        try:
+            for pending in self._deferred.pending(scope):
+                pending.result()
+        except BaseException:
+            self._forget_root(scope, run_id)
+            raise
+        self._deferred.settled(scope)
+
+    def _settle_root(self, run_id: UUID | str) -> None:
+        if self._thread_runs.root(run_id) == str(run_id):
+            self._settle(run_id)
+
     def _classify(
         self,
         text: str,
@@ -127,12 +166,36 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         hook_label: HookLabel,
         tool_name: str | None = None,
     ) -> None:
+        metadata = self._thread_runs.metadata(run_id)
+        check = partial(self._enforce, text, run_id, hook_label, tool_name, metadata)
+        conversation = conversation_id(metadata)
+        if self.background:
+            self.firewall._pending.submit(check, conversation, background=True)
+        elif not self.parallel:
+            check()
+        elif hook_label in _DEFERRED_LABELS:
+            self._deferred.add(
+                self._thread_runs.root(run_id),
+                self.firewall._pending.submit(check, conversation),
+            )
+        else:
+            self._settle(run_id)
+            self.firewall._pending.submit(check, conversation).result()
+
+    def _enforce(
+        self,
+        text: str,
+        run_id: UUID | str,
+        hook_label: HookLabel,
+        tool_name: str | None,
+        metadata: ClassificationMetadata,
+    ) -> None:
         try:
             result = self.firewall._classify_raw(
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
-                metadata=self._thread_runs.metadata(run_id),
+                metadata=metadata,
                 request_id=str(uuid4()),
                 mode=self.mode,
             )
@@ -249,6 +312,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
 
     @track_callback(start=False)
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        self._settle(run_id)
         if FirewallHook.LLM_END not in self._enabled_hooks:
             return
         text = extract_text_from_llm_result(response)
@@ -267,6 +331,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
                 FIREWALL_HOOK_TO_LABEL[FirewallHook.TOOL_END],
                 tool_name=kwargs.get("name"),
             )
+        self._settle_root(run_id)
 
     @track_callback(start=False)
     def on_retriever_end(
@@ -281,6 +346,7 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
         text = extract_text_from_documents(documents)
         if text:
             self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.RETRIEVER_END])
+        self._settle_root(run_id)
 
 
 class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
@@ -301,6 +367,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         shadow_mode: bool | None = None,
         on_classify: Callable[[ClassifyEvent], None | Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
+        parallel: bool = False,
         **removed_options: Any,
     ) -> None:
         reject_conversation_options(removed_options)
@@ -308,6 +375,12 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             raise TypeError(f"Unexpected options: {sorted(removed_options)}")
         super().__init__()
         self._thread_runs = ThreadRuns()
+        self._deferred = Deferred()
+        self._pending = (
+            firewall._pending
+            if isinstance(firewall, AsyncFirewall)
+            else AsyncPendingVerdicts(firewall.max_concurrent, firewall.max_queued)
+        )
         self._sync_handler = SilmarilFirewallHandler(
             firewall,
             hooks=hooks,
@@ -318,25 +391,62 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             shadow_mode=shadow_mode,
             on_classify=None,
             logger=logger,
+            parallel=parallel,
         )
         self.on_classify = on_classify
         self.logger = logger or LOG
 
     @track_callback(start=True)
     async def on_chain_start(self, serialized: Any, inputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        pass
+        self._check(run_id)
 
     @track_callback(start=False)
     async def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        pass
+        await self._settle_root(run_id)
 
     @track_callback(start=False)
     async def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        pass
+        if self._thread_runs.root(run_id) == str(run_id):
+            self._deferred.take(str(run_id))
 
     on_llm_error = on_chain_error
     on_tool_error = on_chain_error
     on_retriever_error = on_chain_error
+
+    async def on_llm_new_token(self, token: str, *, run_id: UUID, **kwargs: Any) -> None:
+        self._check(run_id)
+
+    def _check(self, run_id: UUID | str) -> None:
+        """Raise a deferred block that has already landed, without waiting for the rest."""
+        scope = self._thread_runs.root(run_id)
+        failure = self._deferred.failure(scope)
+        if failure is not None:
+            self._forget_root(scope, run_id)
+            raise failure
+
+    def _forget_root(self, scope: str, run_id: UUID | str) -> None:
+        """A failed verdict stays visible to sibling callbacks until its root run ends."""
+        if scope == str(run_id):
+            self._deferred.take(scope)
+
+    async def _settle(self, run_id: UUID | str) -> None:
+        """Wait for every verdict deferred by this execution before it proceeds."""
+        scope = self._thread_runs.root(run_id)
+        try:
+            for pending in self._deferred.pending(scope):
+                await asyncio.shield(pending)
+        except BaseException:
+            self._forget_root(scope, run_id)
+            raise
+        self._deferred.settled(scope)
+
+    async def flush(self) -> None:
+        """Wait for classifications this handler left running in the background."""
+        await self._pending.drain(asyncio.current_task())
+
+    async def _settle_root(self, run_id: UUID | str) -> None:
+        if self._thread_runs.root(run_id) == str(run_id):
+            await self._settle(run_id)
 
     async def _fire_on_classify(self, event: ClassifyEvent) -> None:
         if self.on_classify is None:
@@ -355,13 +465,36 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         hook_label: HookLabel,
         tool_name: str | None = None,
     ) -> None:
+        metadata = self._thread_runs.metadata(run_id)
+        check = partial(self._enforce, text, run_id, hook_label, tool_name, metadata)
+        conversation = conversation_id(metadata)
+        if self._sync_handler.background:
+            self._pending.submit(check, conversation, background=True)
+        elif not self._sync_handler.parallel:
+            await check()
+        elif hook_label in _DEFERRED_LABELS:
+            self._deferred.add(
+                self._thread_runs.root(run_id), self._pending.submit(check, conversation)
+            )
+        else:
+            await self._settle(run_id)
+            await self._pending.submit(check, conversation)
+
+    async def _enforce(
+        self,
+        text: str,
+        run_id: UUID | str,
+        hook_label: HookLabel,
+        tool_name: str | None,
+        metadata: ClassificationMetadata,
+    ) -> None:
         try:
             result = await _async_classify_raw(
                 self._sync_handler.firewall,
                 text,
                 hook=hook_label,
                 tool_name=tool_name,
-                metadata=self._thread_runs.metadata(run_id),
+                metadata=metadata,
                 request_id=str(uuid4()),
                 mode=self._sync_handler.mode,
             )
@@ -471,6 +604,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
 
     @track_callback(start=False)
     async def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        await self._settle(run_id)
         if FirewallHook.LLM_END not in self._sync_handler._enabled_hooks:
             return
         text = extract_text_from_llm_result(response)
@@ -489,6 +623,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
                 FIREWALL_HOOK_TO_LABEL[FirewallHook.TOOL_END],
                 tool_name=kwargs.get("name"),
             )
+        await self._settle_root(run_id)
 
     @track_callback(start=False)
     async def on_retriever_end(
@@ -503,6 +638,7 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
         text = extract_text_from_documents(documents)
         if text:
             await self._classify(text, run_id, FIREWALL_HOOK_TO_LABEL[FirewallHook.RETRIEVER_END])
+        await self._settle_root(run_id)
 
 
 async def _async_classify_raw(

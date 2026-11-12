@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from functools import partial
 from threading import RLock
 from typing import Any, Literal, NamedTuple, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary, ref
 
+from silmaril_security.sdk._pending import conversation_id, race
 from silmaril_security.sdk._thread_identity import (
     conversation_metadata,
     reject_conversation_options,
@@ -81,6 +84,7 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         fail_open: bool = True,
         max_blocked_attempts: int = 3,
         on_classify: Callable[[ClassifyEvent], None] | None = None,
+        parallel: bool = False,
         **removed_options: Any,
     ) -> None:
         reject_conversation_options(removed_options)
@@ -91,6 +95,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         self.firewall = firewall
         self.mode = firewall._effective_mode(mode, None)
         self.fail_open = fail_open
+        self.background = self.mode == "shadow" and fail_open
+        self.parallel = parallel
         self.max_blocked_attempts = max_blocked_attempts
         self.on_classify = on_classify
         self._notification_checks: OrderedDict[tuple[str, str, str, FirewallMode | None], bool] = OrderedDict()
@@ -134,13 +140,28 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         self._observe(event)
 
     def _classify_decision(self, text: str, hook: HookLabel, request: Any, tool_name: str | None = None) -> _Decision:
-        if not text.strip():
-            return _Decision(False, self.mode)
+        decide, conversation = self._prepared(text, hook, request, tool_name)
+        if self.background and text.strip():
+            self._sync_firewall()._pending.submit(decide, conversation, background=True)
+            return _Decision(False, self.mode, False)
+        return decide()
+
+    def _sync_firewall(self) -> Firewall:
         if isinstance(self.firewall, AsyncFirewall):
             raise TypeError("Use async Deep Agents execution with AsyncFirewall")
+        return self.firewall
+
+    def _prepared(self, text: str, hook: HookLabel, request: Any, tool_name: str | None = None) -> tuple[Callable[[], _Decision], str | None]:
+        metadata = self._metadata(request)
+        return partial(self._decide, text, hook, tool_name, metadata), conversation_id(metadata)
+
+    def _decide(self, text: str, hook: HookLabel, tool_name: str | None, metadata: dict[str, Any]) -> _Decision:
+        firewall = self._sync_firewall()
+        if not text.strip():
+            return _Decision(False, self.mode)
         try:
-            result = self.firewall._classify_raw(
-                text, hook=hook, tool_name=tool_name, metadata=self._metadata(request),
+            result = firewall._classify_raw(
+                text, hook=hook, tool_name=tool_name, metadata=metadata,
                 governance=None, request_id=str(uuid4()), mode=self.mode,
             )
         except ReviewCompatibilityError:
@@ -156,13 +177,21 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         return _Decision(blocked and effective_mode == "block", effective_mode)
 
     async def _aclassify_decision(self, text: str, hook: HookLabel, request: Any, tool_name: str | None = None) -> _Decision:
-        if not text.strip():
-            return _Decision(False, self.mode)
         if not isinstance(self.firewall, AsyncFirewall):
             return self._classify_decision(text, hook, request, tool_name)
+        metadata = self._metadata(request)
+        decide = partial(self._adecide, self.firewall, text, hook, tool_name, metadata)
+        if self.background and text.strip():
+            self.firewall._pending.submit(decide, conversation_id(metadata), background=True)
+            return _Decision(False, self.mode, False)
+        return await decide()
+
+    async def _adecide(self, firewall: AsyncFirewall, text: str, hook: HookLabel, tool_name: str | None, metadata: dict[str, Any]) -> _Decision:
+        if not text.strip():
+            return _Decision(False, self.mode)
         try:
-            result = await self.firewall._classify_raw(
-                text, hook=hook, tool_name=tool_name, metadata=self._metadata(request),
+            result = await firewall._classify_raw(
+                text, hook=hook, tool_name=tool_name, metadata=metadata,
                 governance=None, request_id=str(uuid4()), mode=self.mode,
             )
         except ReviewCompatibilityError:
@@ -176,6 +205,20 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
         blocked = result.prediction == "MALICIOUS" or result.governance is not None and result.governance.action == "block"
         await self._aobserve(ClassifyEvent(hook, tool_name, text, result, blocked, effective_mode == "shadow", mode=effective_mode))
         return _Decision(blocked and effective_mode == "block", effective_mode)
+
+    def _races_model(self, request: ModelRequest) -> bool:
+        """Parallel input checks stop once the blocked-attempt cap needs the verdict first."""
+        return self.parallel and not self.background and self._blocked_count(request) < self.max_blocked_attempts
+
+    def _pending_input(self, request: ModelRequest) -> Awaitable[_Decision]:
+        text = self._input(request)
+        if isinstance(self.firewall, AsyncFirewall):
+            metadata = self._metadata(request)
+            return self.firewall._pending.submit(
+                partial(self._adecide, self.firewall, text, HookLabel.USER_INPUT, None, metadata),
+                conversation_id(metadata),
+            )
+        return asyncio.wrap_future(self.firewall._pending.submit(*self._prepared(text, HookLabel.USER_INPUT, request)))
 
     def _classify(self, text: str, hook: HookLabel, request: Any, tool_name: str | None = None) -> bool:
         return self._classify_decision(text, hook, request, tool_name).enforce
@@ -316,6 +359,12 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
 
     def wrap_model_call(self, request: ModelRequest, handler: Any) -> Any:
         request = self._filter_remote_notifications(request)
+        if self._races_model(request):
+            pending = self._sync_firewall()._pending.submit(*self._prepared(self._input(request), HookLabel.USER_INPUT, request))
+            response = handler(request)
+            if pending.result().enforce:
+                return AIMessage(content=SAFE_OUTPUT_MESSAGE)
+            return self._filter_output(response, request)
         input_decision = self._classify_decision(self._input(request), HookLabel.USER_INPUT, request)
         if input_decision.enforce:
             return AIMessage(content=SAFE_OUTPUT_MESSAGE)
@@ -328,6 +377,11 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request: ModelRequest, handler: Any) -> Any:
         request = await self._afilter_remote_notifications(request)
+        if self._races_model(request):
+            decision, response = await race(self._pending_input(request), handler(request), lambda verdict: verdict.enforce)
+            if decision.enforce:
+                return AIMessage(content=SAFE_OUTPUT_MESSAGE)
+            return await self._afilter_output(response, request)
         input_decision = await self._aclassify_decision(self._input(request), HookLabel.USER_INPUT, request)
         if input_decision.enforce:
             return AIMessage(content=SAFE_OUTPUT_MESSAGE)
@@ -431,7 +485,7 @@ def _with_protection(
         current = existing[0]
         conflicts = [
             attribute
-            for attribute in ("mode", "fail_open", "max_blocked_attempts")
+            for attribute in ("mode", "fail_open", "max_blocked_attempts", "parallel")
             if getattr(current, attribute) != getattr(requested, attribute)
         ]
         if current.on_classify is not requested.on_classify:
