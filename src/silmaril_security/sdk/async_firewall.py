@@ -191,20 +191,21 @@ class AsyncFirewall:
                 "AsyncFirewall.aclose() cannot be called from inside an active "
                 "classification on the same task; close it after the call returns"
             )
-        await asyncio.shield(self._ensure_close_task(asyncio.current_task()))
+        self._pending.skip(asyncio.current_task())
+        await asyncio.shield(self._ensure_close_task())
 
-    def _ensure_close_task(self, caller: asyncio.Task[Any] | None) -> asyncio.Task[None]:
+    def _ensure_close_task(self) -> asyncio.Task[None]:
         if self._close_task is None:
             self._closing = True
             self._pending.closing = True
-            task = asyncio.get_running_loop().create_task(self._drain_and_close(caller))
+            task = asyncio.get_running_loop().create_task(self._drain_and_close())
             task.add_done_callback(self._observe_close_task)
             self._close_task = task
         return self._close_task
 
-    async def _drain_and_close(self, caller: asyncio.Task[Any] | None) -> None:
+    async def _drain_and_close(self) -> None:
         try:
-            await self._pending.drain(caller)
+            await self._pending.drain()
             if self._active_requests:
                 await self._idle.wait()
             if self._owns_client and self._client is not None:
@@ -370,7 +371,8 @@ class AsyncFirewall:
 
     async def flush(self) -> None:
         """Wait for classifications still running in the background."""
-        await self._pending.drain(asyncio.current_task())
+        self._pending.skip(asyncio.current_task())
+        await self._pending.drain()
 
     def as_async_langchain_handler(self, **options: Any) -> Any:
         """Create an asynchronous LangChain callback handler sharing this client."""

@@ -442,7 +442,8 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
 
     async def flush(self) -> None:
         """Wait for classifications this handler left running in the background."""
-        await self._pending.drain(asyncio.current_task())
+        self._pending.skip(asyncio.current_task())
+        await self._pending.drain()
 
     async def _settle_root(self, run_id: UUID | str) -> None:
         if self._thread_runs.root(run_id) == str(run_id):

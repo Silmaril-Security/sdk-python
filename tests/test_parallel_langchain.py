@@ -336,3 +336,35 @@ def test_many_sibling_threads_join_the_same_deferred_block(monkeypatch):
     assert len(outcomes) == 8
     assert all(isinstance(outcome, FirewallBlockedException) for outcome in outcomes)
     assert held.hooks == [HookLabel.USER_INPUT]
+
+
+def test_busy_handler_keeps_unfinished_and_blocked_verdicts(monkeypatch):
+    monkeypatch.setattr("silmaril_security.sdk._pending.MAX_DEFERRED_SCOPES", 2)
+    held = HeldClassification("MALICIOUS")
+    fw = _firewall(monkeypatch, held)
+    handler = fw.as_langchain_handler(parallel=True)
+    runs = [uuid4() for _ in range(6)]
+
+    for run_id in runs:
+        handler.on_chat_model_start(serialized={}, messages=USER, run_id=run_id)
+    held.release.set()
+
+    for run_id in runs:
+        with pytest.raises(FirewallBlockedException):
+            handler.on_llm_end(ANSWER, run_id=run_id)
+    assert all(handler._deferred.pending(str(run_id)) == [] for run_id in runs)
+
+
+def test_busy_handler_forgets_only_runs_whose_verdicts_passed(monkeypatch):
+    monkeypatch.setattr("silmaril_security.sdk._pending.MAX_DEFERRED_SCOPES", 2)
+    held = HeldClassification()
+    held.release.set()
+    fw = _firewall(monkeypatch, held)
+    handler = fw.as_langchain_handler(parallel=True)
+    abandoned = [uuid4() for _ in range(4)]
+
+    for run_id in abandoned:
+        handler.on_chat_model_start(serialized={}, messages=USER, run_id=run_id)
+        fw.flush()
+
+    assert sum(bool(handler._deferred.pending(str(run_id))) for run_id in abandoned) <= 2

@@ -53,6 +53,10 @@ def _retrieve(done: asyncio.Future[Any]) -> None:
         done.exception()
 
 
+def _passed(pending: Any) -> bool:
+    return pending.done() and not pending.cancelled() and pending.exception() is None
+
+
 class _Depths:
     """Bounded counts of unjoined classifications, per conversation and in the background."""
 
@@ -189,6 +193,8 @@ class AsyncPendingVerdicts:
         self._outstanding: set[asyncio.Task[None]] = set()
         self._previous: dict[asyncio.Task[None], asyncio.Task[None]] = {}
         self._sending: dict[asyncio.Future[Any], asyncio.Task[None]] = {}
+        self._skipped: set[asyncio.Task[None]] = set()
+        self._skips = asyncio.Event()
 
     def submit(
         self,
@@ -263,29 +269,40 @@ class AsyncPendingVerdicts:
     ) -> None:
         self._outstanding.discard(done)
         self._previous.pop(done, None)
+        self._skipped.discard(done)
         self._depths.leave(conversation, background)
         if conversation is not None and self._tails.get(conversation) is done:
             del self._tails[conversation]
         _retrieve(done)
 
-    def _depends(self, link: asyncio.Task[None] | None, blocker: asyncio.Task[None] | None) -> bool:
-        while link is not None and blocker is not None:
-            if link is blocker:
+    def _skippable(self, link: asyncio.Task[None] | None) -> bool:
+        while link is not None:
+            if link in self._skipped:
                 return True
             link = self._previous.get(link)
         return False
 
-    async def drain(self, caller: asyncio.Task[Any] | None = None) -> None:
-        """Wait until every classification started so far has had its turn.
+    def skip(self, caller: asyncio.Task[Any] | None) -> None:
+        """Stop draining work that cannot finish before ``caller`` returns.
 
-        Work queued behind a classification that ``caller`` is running inside,
-        such as an ``on_classify`` callback, cannot finish first and is skipped.
+        A caller running inside a queued classification, such as its
+        ``on_classify`` callback, holds that classification and everything
+        queued behind it open, so a drain it waits on must not wait for them.
         """
         blocker = self._sending.get(caller) if caller is not None else None
-        while waiting := {
-            link for link in self._outstanding if not self._depends(link, blocker)
-        }:
-            await asyncio.wait(waiting)
+        if blocker is not None:
+            self._skipped.add(blocker)
+            self._skips.set()
+
+    async def drain(self) -> None:
+        """Wait until every classification started so far has had its turn."""
+        while waiting := {link for link in self._outstanding if not self._skippable(link)}:
+            self._skips.clear()
+            skipped = asyncio.ensure_future(self._skips.wait())
+            try:
+                await asyncio.wait({*waiting, skipped}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                skipped.cancel()
 
 
 async def race(
@@ -315,7 +332,12 @@ async def race(
 
 
 class Deferred:
-    """Pending verdicts grouped by the execution that must join them."""
+    """Pending verdicts grouped by the execution that must join them.
+
+    A verdict that is unfinished or failed is kept until its execution ends.
+    Past ``MAX_DEFERRED_SCOPES`` only executions whose verdicts all passed are
+    forgotten, which covers runs whose end callback never arrived.
+    """
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -323,8 +345,12 @@ class Deferred:
 
     def add(self, scope: str, pending: Any) -> None:
         with self._lock:
-            while scope not in self._scopes and len(self._scopes) >= MAX_DEFERRED_SCOPES:
-                del self._scopes[next(iter(self._scopes))]
+            if scope not in self._scopes and len(self._scopes) >= MAX_DEFERRED_SCOPES:
+                self._scopes = {
+                    kept: verdicts
+                    for kept, verdicts in self._scopes.items()
+                    if not all(_passed(verdict) for verdict in verdicts)
+                }
             self._scopes.setdefault(scope, []).append(pending)
 
     def pending(self, scope: str) -> list[Any]:
@@ -336,9 +362,7 @@ class Deferred:
         """Forget verdicts that passed; a failed one stays until the scope is taken."""
         with self._lock:
             remaining = [
-                pending
-                for pending in self._scopes.get(scope, ())
-                if not pending.done() or pending.cancelled() or pending.exception() is not None
+                pending for pending in self._scopes.get(scope, ()) if not _passed(pending)
             ]
             if remaining:
                 self._scopes[scope] = remaining

@@ -547,3 +547,31 @@ async def test_cancelled_flush_leaves_background_work_running_for_the_next_flush
         [f"prompt-{i}" for i in range(4)] + ["answer"] * 4
     )
     assert fw._pending._outstanding == set()
+
+
+@pytest.mark.asyncio
+async def test_callback_close_during_a_close_started_elsewhere_does_not_deadlock(monkeypatch):
+    held = AsyncHeldClassification()
+    closed_from_callback = asyncio.Event()
+
+    async def close_from_callback(event: ClassifyEvent) -> None:
+        await fw.aclose()
+        closed_from_callback.set()
+
+    fw = _async_firewall(monkeypatch, held, mode="shadow", on_classify=close_from_callback)
+    client = fw._ensure_client()
+
+    async def operation() -> None:
+        return None
+
+    await fw.protect(operation, text="background", metadata={"conversationId": "conversation-1"})
+    await asyncio.wait_for(held.started.wait(), WAIT_SECONDS)
+    outside = asyncio.ensure_future(fw.aclose())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not outside.done()
+
+    held.release.set()
+    await asyncio.wait_for(outside, WAIT_SECONDS)
+    await asyncio.wait_for(closed_from_callback.wait(), WAIT_SECONDS)
+    assert client.is_closed
