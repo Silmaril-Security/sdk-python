@@ -41,7 +41,7 @@ jobs:
           import os, subprocess
           before = os.environ.get('BEFORE', '')
           try:
-              paths = subprocess.check_output(['git', 'diff', '--name-only', before, 'HEAD'], stderr=subprocess.DEVNULL, text=True).splitlines()
+              paths = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', before, 'HEAD'], stderr=subprocess.DEVNULL, text=True).splitlines()
               selected = not paths or any(not (p.endswith(('.md', '.mdx')) or p.startswith('docs/')) for p in paths)
           except subprocess.CalledProcessError:
               selected = True
@@ -120,6 +120,10 @@ jobs:
             echo "version=${version}"
             echo "tag=${tag}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Record docs-only customer acceptance skip
+        if: steps.selection.outputs.should_test == 'false' && steps.plan.outputs.should_release == 'false'
+        run: echo 'Customer acceptance skipped for a documentation-only push with no new release.' >> "$GITHUB_STEP_SUMMARY"
 
   build:
     name: Build distribution
