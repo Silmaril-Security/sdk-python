@@ -605,9 +605,11 @@ calls are appropriate for independent events or different conversations.
 
 ## Parallel Classification
 
-`protect()` runs your call while its input is classified, instead of waiting
-for the verdict first. It takes the same options as `classify()` and returns
-your call's result:
+`protect()` runs your call while its input is classified and returns your
+call's result. Both `Firewall.protect()` and `AsyncFirewall.protect()` accept
+`hook`, `tool_name`, `metadata`, `governance`, `mode`, `review`, and
+`request_id` as classification options. Use `mode` to choose enforcement for
+this call. The legacy `shadow_mode` keyword is available on `classify()`.
 
 ```python
 answer = fw.protect(
