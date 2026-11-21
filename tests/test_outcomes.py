@@ -95,3 +95,10 @@ def test_harmful_outcomes_reject_benign_and_malformed_maps():
 def test_harmful_outcome_count_map_rejects_negative_counts(outcome):
     with pytest.raises(ValueError, match="expected nonnegative int"):
         normalize_harmful_outcome_int_map({outcome: -1}, "detector_counts")
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1])
+@pytest.mark.parametrize("field", ["outcome_scores", "detector_scores"])
+def test_harmful_outcome_score_map_rejects_out_of_range_scores(field, value):
+    with pytest.raises(ValueError, match=f"invalid {field} value"):
+        normalize_harmful_outcome_float_map({"future_outcome": value}, field)

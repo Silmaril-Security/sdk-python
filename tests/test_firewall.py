@@ -588,6 +588,23 @@ def test_classify_rejects_invalid_backend_mode(monkeypatch):
         fw.classify("payload")
 
 
+@pytest.mark.parametrize("field", ["score", "threshold"])
+@pytest.mark.parametrize("value", ["0.5", True, None, float("nan"), float("inf"), -0.1, 1.1])
+def test_rejects_invalid_verdict_number(field, value):
+    payload = {"prediction": "BENIGN", "score": 0.0, "threshold": 1.0}
+    payload[field] = value
+    with pytest.raises(ValueError, match=f"response {field} must be a finite number"):
+        _block_result_from_json(payload)
+
+
+@pytest.mark.parametrize("field", ["score", "threshold"])
+def test_rejects_absent_verdict_number(field):
+    payload = {"prediction": "BENIGN", "score": 0.0, "threshold": 1.0}
+    del payload[field]
+    with pytest.raises(ValueError, match=f"response {field} must be a finite number"):
+        _block_result_from_json(payload)
+
+
 def test_backend_controlled_mode_less_response_preserves_absence():
     result = _block_result_from_json(
         {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5}
