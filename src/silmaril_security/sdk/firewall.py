@@ -132,13 +132,24 @@ def _require_review_acknowledgement(
     return requested
 
 
+def _verdict_number(data: Mapping[str, Any], field: str) -> float:
+    value = data.get(field)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not 0 <= value <= 1
+    ):
+        raise ValueError(f"Firewall: response {field} must be a finite number between 0 and 1")
+    return float(value)
+
+
 def _block_result_from_json(
     data: dict[str, Any],
     requested_mode: FirewallMode | None = None,
     review: ReviewLevel | None = None,
 ) -> BlockResult:
-    score = float(data["score"])
-    threshold = float(data["threshold"])
+    score = _verdict_number(data, "score")
+    threshold = _verdict_number(data, "threshold")
     prediction = data.get("prediction")
     if prediction is None:
         raise ValueError(

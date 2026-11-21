@@ -180,12 +180,15 @@ def normalize_harmful_outcome_float_map(
             raise ValueError(
                 f"Firewall: invalid {field_name} value for {key!r}: {raw!r} (expected number)"
             )
-        score = float(raw)
-        if not math.isfinite(score):
+        if isinstance(raw, float) and not math.isfinite(raw):
             raise ValueError(
                 f"Firewall: invalid {field_name} value for {key!r}: {raw!r} (non-finite)"
             )
-        result[outcome_key] = score
+        if not 0 <= raw <= 1:
+            raise ValueError(
+                f"Firewall: invalid {field_name} value for {key!r} (expected number between 0 and 1)"
+            )
+        result[outcome_key] = float(raw)
     return result
 
 
