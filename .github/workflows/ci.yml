@@ -12,6 +12,25 @@ permissions:
   contents: read
 
 jobs:
+  package-version:
+    name: Package version bump
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install packaging==25.0
+      - name: Compare the proposed merge with its main parent
+        run: python3 .github/scripts/check-package-version.py HEAD^1 HEAD
+
   test:
     name: Python ${{ matrix.python-version }} (${{ matrix.profile }})
     runs-on: ubuntu-latest
