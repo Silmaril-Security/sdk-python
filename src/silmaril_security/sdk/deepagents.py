@@ -172,9 +172,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             logging.getLogger(__name__).warning("Firewall classification failed", exc_info=True)
             return _Decision(False, self.mode, False)
         effective_mode = self.mode or result.mode or "block"
-        blocked = result.prediction == "MALICIOUS" or result.governance is not None and result.governance.action == "block"
-        self._observe(ClassifyEvent(hook, tool_name, text, result, blocked, effective_mode == "shadow", mode=effective_mode))
-        return _Decision(blocked and effective_mode == "block", effective_mode)
+        self._observe(ClassifyEvent(hook, tool_name, text, result, result.blocked, effective_mode == "shadow", mode=effective_mode))
+        return _Decision(result.blocked and effective_mode == "block", effective_mode)
 
     async def _aclassify_decision(self, text: str, hook: HookLabel, request: Any, tool_name: str | None = None) -> _Decision:
         if not isinstance(self.firewall, AsyncFirewall):
@@ -202,9 +201,8 @@ class SilmarilDeepAgentsMiddleware(AgentMiddleware):
             logging.getLogger(__name__).warning("Firewall classification failed", exc_info=True)
             return _Decision(False, self.mode, False)
         effective_mode = self.mode or result.mode or "block"
-        blocked = result.prediction == "MALICIOUS" or result.governance is not None and result.governance.action == "block"
-        await self._aobserve(ClassifyEvent(hook, tool_name, text, result, blocked, effective_mode == "shadow", mode=effective_mode))
-        return _Decision(blocked and effective_mode == "block", effective_mode)
+        await self._aobserve(ClassifyEvent(hook, tool_name, text, result, result.blocked, effective_mode == "shadow", mode=effective_mode))
+        return _Decision(result.blocked and effective_mode == "block", effective_mode)
 
     def _races_model(self, request: ModelRequest) -> bool:
         """Parallel input checks stop once the blocked-attempt cap needs the verdict first."""

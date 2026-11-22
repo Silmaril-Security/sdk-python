@@ -36,7 +36,7 @@ for case in scenario["cases"]:
         dict(
             id=case["id"],
             request_id=request_id,
-            prediction=result.prediction,
+            action=result.action,
             blocked=blocked,
             wrote_summary=summary.is_file(),
         )

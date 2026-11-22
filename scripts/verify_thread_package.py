@@ -22,9 +22,9 @@ fw = Firewall(api_key="package-test", api_url="https://package.invalid/classify"
 payloads = []
 
 
-def classify(payload):
+def classify(url, payload):
     payloads.append(payload)
-    return {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5, "mode": "block"}
+    return {"results": [{"action": "allow"}]}
 
 
 fw._post_json = classify

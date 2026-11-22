@@ -7,6 +7,17 @@ from typing import Any
 
 import pytest
 import requests
+from wire import (
+    TEST_API_URL,
+    V2_URL,
+    FakeResponse,
+    RecordingAdapter,
+    decision,
+    governance_block,
+    model_block,
+    results,
+    v1,
+)
 
 from silmaril_security.sdk import (
     OUTCOME_SECRET_EXPOSURE,
@@ -22,68 +33,7 @@ from silmaril_security.sdk import (
     SilmarilApiError,
 )
 from silmaril_security.sdk._version import VERSION
-from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES, _block_result_from_json
-
-TEST_API_URL = "https://api.test.invalid/classify"
-
-
-class FakeResponse:
-    def __init__(
-        self,
-        status_code: int,
-        body: dict[str, Any] | str,
-        *,
-        reason: str | None = None,
-        headers: dict[str, str] | None = None,
-        include_default_mode: bool = True,
-    ) -> None:
-        self.status_code = status_code
-        self._body = body
-        self.reason = reason or f"status-{status_code}"
-        self.headers = headers or {}
-        self.include_default_mode = include_default_mode
-
-    @property
-    def text(self) -> str:
-        return self._body if isinstance(self._body, str) else str(self._body)
-
-    def json(self) -> dict[str, Any]:
-        assert isinstance(self._body, dict)
-        if not self.include_default_mode:
-            return self._body
-        if isinstance(self._body.get("prediction"), str):
-            return {"mode": "block", **self._body}
-        predictions = self._body.get("predictions")
-        if isinstance(predictions, list):
-            return {
-                **self._body,
-                "predictions": [
-                    {"mode": "block", **item} if isinstance(item, dict) else item
-                    for item in predictions
-                ],
-            }
-        return self._body
-
-
-class RecordingAdapter(requests.adapters.BaseAdapter):
-    def __init__(self, responses: list[tuple[int, dict[str, Any] | str]]) -> None:
-        self.responses = responses
-        self.requests: list[requests.PreparedRequest] = []
-
-    def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
-        self.requests.append(request)
-        status_code, body = self.responses.pop(0)
-        response = requests.Response()
-        response.status_code = status_code
-        response.request = request
-        response.url = request.url
-        response._content = (
-            json.dumps(body).encode() if isinstance(body, dict) else body.encode()
-        )
-        return response
-
-    def close(self) -> None:
-        pass
+from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES, _block_results
 
 
 def test_constructor_requires_key_and_url():
@@ -128,7 +78,7 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch, timeout):
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append({"url": url, **kwargs})
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.12, "threshold": 0.5})
+        return FakeResponse(200, results(decision()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -139,13 +89,8 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch, timeout):
         request_id="req-test",
     )
 
-    assert result == BlockResult(
-        prediction="BENIGN",
-        score=0.12,
-        threshold=0.5,
-        mode="block",
-    )
-    assert calls[0]["url"] == TEST_API_URL
+    assert result == BlockResult(action="allow")
+    assert calls[0]["url"] == V2_URL
     assert calls[0]["headers"] == {
         "x-api-key": "sk-test",
         "content-type": "application/json",
@@ -167,8 +112,7 @@ def test_classify_posts_wire_shape_and_returns_result(monkeypatch, timeout):
     }
 
 
-def test_classify_preserves_governance_response_evidence_and_legacy_shape():
-    benign = {"prediction": "BENIGN", "score": 0.0, "threshold": 0.5}
+def test_classify_preserves_governance_response_evidence_and_absence():
     resource = {
         "kind": "mcp_tool",
         "id": "create_issue",
@@ -178,32 +122,34 @@ def test_classify_preserves_governance_response_evidence_and_legacy_shape():
         [
             (
                 200,
-                {
-                    **benign,
-                    "governance": {
-                        "action": "block",
-                        "policy_version": "schema6",
-                        "rule_id": "deny-github",
-                        "resource": resource,
-                        "identity_revision": "catalog-9",
-                        "reason": "identity_unresolved",
-                    },
-                },
+                results(
+                    governance_block(
+                        {
+                            "action": "block",
+                            "policy_version": "schema6",
+                            "rule_id": "deny-github",
+                            "resource": resource,
+                            "identity_revision": "catalog-9",
+                            "reason": "identity_unresolved",
+                        }
+                    )
+                ),
             ),
             (
                 200,
-                {
-                    **benign,
-                    "governance": {
-                        "action": "allow",
-                        "policy_version": "schema6",
-                        "resource": resource,
-                        "identity_revision": "\u00a0\ufeff\u0085",
-                        "reason": "\u001cfuture_identity_reason\u3000",
-                    },
-                },
+                results(
+                    decision(
+                        governance={
+                            "action": "allow",
+                            "policy_version": "schema6",
+                            "resource": resource,
+                            "identity_revision": "\u00a0\ufeff\u0085",
+                            "reason": "\u001cfuture_identity_reason\u3000",
+                        }
+                    )
+                ),
             ),
-            (200, benign),
+            (200, results(decision())),
         ]
     )
     session = requests.Session()
@@ -213,24 +159,25 @@ def test_classify_preserves_governance_response_evidence_and_legacy_shape():
     with pytest.raises(FirewallBlockedException) as exc_info:
         fw.classify("governed")
 
-    decision = exc_info.value.result.governance
-    assert decision is not None
-    assert decision.action == "block"
-    assert decision.policy_version == "schema6"
-    assert decision.rule_id == "deny-github"
-    assert decision.resource == GovernanceResource(
+    assert exc_info.value.result.source == "governance"
+    governance = exc_info.value.result.governance
+    assert governance is not None
+    assert governance.action == "block"
+    assert governance.policy_version == "schema6"
+    assert governance.rule_id == "deny-github"
+    assert governance.resource == GovernanceResource(
         kind="mcp_tool",
         id="create_issue",
         parent_id="github",
     )
-    assert decision.identity_revision == "catalog-9"
-    assert decision.reason == "identity_unresolved"
+    assert governance.identity_revision == "catalog-9"
+    assert governance.reason == "identity_unresolved"
 
     future = fw.classify("future reason")
     assert future.governance is not None
     assert future.governance.identity_revision == "\u00a0\ufeff\u0085"
     assert future.governance.reason == "\u001cfuture_identity_reason\u3000"
-    assert fw.classify("legacy").governance is None
+    assert fw.classify("ungoverned").governance is None
 
 
 @pytest.mark.parametrize(
@@ -246,17 +193,16 @@ def test_governance_response_accepts_absent_optional_evidence(evidence):
         [
             (
                 200,
-                {
-                    "prediction": "BENIGN",
-                    "score": 0.1,
-                    "threshold": 0.5,
-                    "governance": {
-                        "action": "allow",
-                        "policy_version": "legacy-policy",
-                        "rule_id": "legacy-rule",
-                        **evidence,
-                    },
-                },
+                results(
+                    decision(
+                        governance={
+                            "action": "allow",
+                            "policy_version": "legacy-policy",
+                            "rule_id": "legacy-rule",
+                            **evidence,
+                        }
+                    )
+                ),
             )
         ]
     )
@@ -298,16 +244,15 @@ def test_governance_response_rejects_malformed_string_evidence(field, value):
         [
             (
                 200,
-                {
-                    "prediction": "BENIGN",
-                    "score": 0.1,
-                    "threshold": 0.5,
-                    "governance": {
-                        "action": "allow",
-                        "policy_version": "schema6",
-                        field: value,
-                    },
-                },
+                results(
+                    decision(
+                        governance={
+                            "action": "allow",
+                            "policy_version": "schema6",
+                            field: value,
+                        }
+                    )
+                ),
             )
         ]
     )
@@ -324,13 +269,10 @@ def test_governance_response_rejects_malformed_string_evidence(field, value):
 
 @pytest.mark.parametrize("kind", [None, 1, [], {}])
 def test_governance_response_rejects_non_string_resource_kind(kind):
-    adapter = RecordingAdapter([(200, {
-        "prediction": "BENIGN", "score": 0.1, "threshold": 0.5,
-        "governance": {
-            "action": "allow", "policy_version": "schema6",
-            "resource": {"kind": kind, "id": "search"},
-        },
-    })])
+    adapter = RecordingAdapter([(200, results(decision(governance={
+        "action": "allow", "policy_version": "schema6",
+        "resource": {"kind": kind, "id": "search"},
+    })))])
     session = requests.Session()
     session.mount("https://api.test.invalid/", adapter)
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
@@ -339,11 +281,11 @@ def test_governance_response_rejects_non_string_resource_kind(kind):
 
 
 def test_shared_session_uses_client_headers_for_batch_and_retries(monkeypatch):
-    benign = {"prediction": "BENIGN", "score": 0.12, "threshold": 0.5}
+    benign = results(decision())
     adapter = RecordingAdapter(
         [
             (200, benign),
-            (200, {"predictions": [benign, benign]}),
+            (200, results(decision(), decision())),
             (429, "rate limited"),
             (200, benign),
             (200, benign),
@@ -387,7 +329,7 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append({"url": url, **kwargs})
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.12, "threshold": 0.5})
+        return FakeResponse(200, results(decision()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -422,18 +364,19 @@ def test_classify_posts_metadata_when_provided(monkeypatch):
     }
 
 
-def test_classify_enforces_backend_block_mode(monkeypatch):
+def test_classify_raises_on_block_action(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         return FakeResponse(
             200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.1,
-                "threshold": 0.9,
-                "mode": "block",
-            },
+            results(
+                model_block(
+                    confidence="high",
+                    severity="moderate",
+                    outcome=OUTCOME_SECRET_EXPOSURE,
+                )
+            ),
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
@@ -441,11 +384,63 @@ def test_classify_enforces_backend_block_mode(monkeypatch):
     with pytest.raises(FirewallBlockedException) as exc_info:
         fw.classify("ignore previous", hook=HookLabel.USER_INPUT, tool_name="chat")
 
-    assert exc_info.value.score == 0.1
-    assert exc_info.value.threshold == 0.9
+    assert exc_info.value.result == BlockResult(
+        action="block",
+        source="model",
+        confidence="high",
+        severity="moderate",
+        outcome=OUTCOME_SECRET_EXPOSURE,
+    )
     assert exc_info.value.hook == HookLabel.USER_INPUT
     assert exc_info.value.tool_name == "chat"
-    assert exc_info.value.result is not None
+    assert str(exc_info.value) == (
+        "Request blocked by Silmaril Firewall (action=block, source=model, confidence=high, "
+        "severity=moderate, outcome=secret_exposure): 'ignore previous'"
+    )
+
+
+@pytest.mark.parametrize("action", ["block", "quarantine", "ALLOW", ""])
+def test_classify_blocks_on_any_action_other_than_allow(monkeypatch, action):
+    events: list[ClassifyEvent] = []
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, on_classify=events.append)
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(200, results(decision(action))),
+    )
+
+    with pytest.raises(FirewallBlockedException) as exc_info:
+        fw.classify("payload")
+
+    assert exc_info.value.result == BlockResult(action="block")
+    assert exc_info.value.result.blocked is True
+    assert events[0].blocked is True
+    assert fw.classify("payload", mode="warn").action == "block"
+
+
+def test_evidence_never_affects_enforcement(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
+            results(
+                decision(
+                    source="model",
+                    confidence="very_high",
+                    severity="critical",
+                    outcome=OUTCOME_SECRET_EXPOSURE,
+                    governance={"action": "block", "policy_version": "schema6"},
+                )
+            ),
+        ),
+    )
+
+    result = fw.classify("payload")
+
+    assert result.action == "allow"
+    assert result.blocked is False
 
 
 def test_classify_shadow_mode_suppresses_block_and_emits_event(monkeypatch):
@@ -458,21 +453,13 @@ def test_classify_shadow_mode_suppresses_block_and_emits_event(monkeypatch):
     )
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(
-            200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "mode": "shadow",
-            },
-        )
+        return FakeResponse(200, results(model_block()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
     result = fw.classify("ignore previous", hook=HookLabel.TOOL_RESPONSE)
 
-    assert result.score == 0.91
+    assert result.action == "block"
     assert len(events) == 1
     assert events[0].blocked is True
     assert events[0].shadow_mode is True
@@ -483,7 +470,7 @@ def test_classify_per_call_shadow_mode_override(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"prediction": "MALICIOUS", "score": 0.91, "threshold": 0.5})
+        return FakeResponse(200, results(model_block()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -491,7 +478,7 @@ def test_classify_per_call_shadow_mode_override(monkeypatch):
         fw.classify("attack", shadow_mode=False)
 
 
-def test_classify_omits_mode_for_backend_control_and_consumes_effective_warn(monkeypatch):
+def test_classify_omits_mode_for_backend_control_and_consumes_adapted_warn(monkeypatch):
     events = []
     calls: list[dict[str, Any]] = []
     fw = Firewall(
@@ -499,18 +486,11 @@ def test_classify_omits_mode_for_backend_control_and_consumes_effective_warn(mon
         api_url=TEST_API_URL,
         on_classify=events.append,
     )
+    fw._route.legacy = True
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append(kwargs)
-        return FakeResponse(
-            200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "mode": "warn",
-            },
-        )
+        return FakeResponse(200, v1("MALICIOUS", mode="warn"))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -530,18 +510,11 @@ def test_explicit_mode_precedes_legacy_shadow_mode(monkeypatch):
         mode="warn",
         shadow_mode=False,
     )
+    fw._route.legacy = True
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append(kwargs)
-        return FakeResponse(
-            200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "mode": "shadow",
-            },
-        )
+        return FakeResponse(200, v1("MALICIOUS", mode="shadow"))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -552,21 +525,14 @@ def test_explicit_mode_precedes_legacy_shadow_mode(monkeypatch):
     assert exc_info.value.result.mode == "block"
 
 
-def test_explicit_shadow_cannot_be_escalated_by_mixed_backend_response(monkeypatch):
+def test_explicit_shadow_cannot_be_escalated_by_adapted_response(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="shadow")
+    fw._route.legacy = True
 
     monkeypatch.setattr(
         fw._session,
         "post",
-        lambda *_args, **_kwargs: FakeResponse(
-            200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "mode": "block",
-            },
-        ),
+        lambda *_args, **_kwargs: FakeResponse(200, v1("MALICIOUS", mode="block")),
     )
 
     result = fw.classify("attack")
@@ -574,19 +540,12 @@ def test_explicit_shadow_cannot_be_escalated_by_mixed_backend_response(monkeypat
     assert result.mode == "shadow"
 
 
-def test_classify_rejects_invalid_backend_mode(monkeypatch):
+def test_classify_rejects_invalid_adapted_mode(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    fw._route.legacy = True
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(
-            200,
-            {
-                "prediction": "BENIGN",
-                "score": 0.1,
-                "threshold": 0.5,
-                "mode": "enforce",
-            },
-        )
+        return FakeResponse(200, v1(mode="enforce"))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -594,27 +553,29 @@ def test_classify_rejects_invalid_backend_mode(monkeypatch):
         fw.classify("payload")
 
 
-@pytest.mark.parametrize("field", ["score", "threshold"])
-@pytest.mark.parametrize("value", ["0.5", True, None, float("nan"), float("inf"), -0.1, 1.1])
-def test_rejects_invalid_verdict_number(field, value):
-    payload = {"prediction": "BENIGN", "score": 0.0, "threshold": 1.0}
-    payload[field] = value
-    with pytest.raises(ValueError, match=f"response {field} must be a finite number"):
-        _block_result_from_json(payload)
-
-
-@pytest.mark.parametrize("field", ["score", "threshold"])
-def test_rejects_absent_verdict_number(field):
-    payload = {"prediction": "BENIGN", "score": 0.0, "threshold": 1.0}
-    del payload[field]
-    with pytest.raises(ValueError, match=f"response {field} must be a finite number"):
-        _block_result_from_json(payload)
-
-
-def test_backend_controlled_mode_less_response_preserves_absence():
-    result = _block_result_from_json(
-        {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5}
+def test_version_2_response_ignores_unknown_fields(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200,
+            results(
+                model_block(mode="enforce", score=0.99, prediction="BENIGN", trace={"id": 7}),
+                mode="shadow",
+                model_id="silmaril-cascade-1-6",
+            ),
+        ),
     )
+
+    with pytest.raises(FirewallBlockedException) as exc_info:
+        fw.classify("payload")
+
+    assert exc_info.value.result == BlockResult(action="block", source="model")
+
+
+def test_mode_less_response_preserves_absence():
+    result = _block_results(results(model_block()), expected_length=1, mode=None, review=None)[0]
 
     assert result.mode is None
 
@@ -622,15 +583,7 @@ def test_backend_controlled_mode_less_response_preserves_absence():
 def test_requested_warn_is_preserved_when_legacy_backend_omits_mode(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="warn")
 
-    monkeypatch.setattr(
-        fw,
-        "_post_json",
-        lambda payload: {
-            "prediction": "MALICIOUS",
-            "score": 0.9,
-            "threshold": 0.5,
-        },
-    )
+    monkeypatch.setattr(fw, "_exchange", lambda payload: v1("MALICIOUS"))
 
     result = fw.classify("attack")
 
@@ -643,10 +596,7 @@ def test_legacy_shadow_mode_is_preserved_when_backend_omits_mode(monkeypatch):
     monkeypatch.setattr(
         fw._session,
         "post",
-        lambda *_args, **_kwargs: FakeResponse(
-            200,
-            {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5},
-        ),
+        lambda *_args, **_kwargs: FakeResponse(200, results(model_block())),
     )
 
     result = fw.classify("attack")
@@ -654,8 +604,8 @@ def test_legacy_shadow_mode_is_preserved_when_backend_omits_mode(monkeypatch):
     assert result.mode == "shadow"
 
 
-def test_public_positional_constructors_remain_compatible():
-    result = BlockResult("BENIGN", 0.1, 0.5, OUTCOME_SECRET_EXPOSURE)
+def test_classify_event_positional_constructor_remains_compatible():
+    result = BlockResult("allow")
     event = ClassifyEvent(
         HookLabel.USER_INPUT,
         None,
@@ -665,7 +615,7 @@ def test_public_positional_constructors_remain_compatible():
         True,
     )
 
-    assert result.primary_outcome == OUTCOME_SECRET_EXPOSURE
+    assert result.blocked is False
     assert result.mode is None
     assert event.mode == "shadow"
     assert event.shadow_mode is True
@@ -676,18 +626,8 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     calls: list[dict[str, Any]] = []
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        calls.append(kwargs)
-        return FakeResponse(
-            200,
-            {
-                "predictions": [
-                    {"prediction": "MALICIOUS", "score": 0.8, "threshold": 0.5},
-                    {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
-                    {"prediction": "MALICIOUS", "score": 0.8, "threshold": 0.5},
-                ]
-            },
-            include_default_mode=False,
-        )
+        calls.append({"url": url, **kwargs})
+        return FakeResponse(200, results(model_block(), decision(), model_block()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -701,6 +641,7 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     assert len(exc_info.value.results) == 3
     assert [item.index for item in exc_info.value.blocked] == [0, 2]
     assert exc_info.value.blocked[0].tool_name == "chat"
+    assert calls[0]["url"] == V2_URL
     body = json.loads(calls[0]["data"])
     assert body["texts"] == ["first", "second", "third"]
     assert "mode" not in body
@@ -713,21 +654,32 @@ def test_classify_batch_wire_shape_and_block_error(monkeypatch):
     assert all("chunk_count" not in item["silmaril"] for item in body["metadata"])
 
 
+def test_single_blocked_batch_item_message_carries_evidence(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL)
+    monkeypatch.setattr(
+        fw._session,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            200, results(decision(), model_block(outcome=OUTCOME_SECRET_EXPOSURE))
+        ),
+    )
+
+    with pytest.raises(BatchFirewallBlockedException) as exc_info:
+        fw.classify_batch(["safe", "attack"])
+
+    assert str(exc_info.value) == (
+        "Batch request blocked by Silmaril Firewall at index 1 "
+        "(action=block, source=model, outcome=secret_exposure)"
+    )
+
+
 def test_classify_batch_serializes_metadata(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
     calls: list[dict[str, Any]] = []
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append(kwargs)
-        return FakeResponse(
-            200,
-            {
-                "predictions": [
-                    {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
-                    {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
-                ]
-            },
-        )
+        return FakeResponse(200, results(decision(), decision()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -768,26 +720,13 @@ def test_classify_batch_shadow_mode_returns_results(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(
-            200,
-            {
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.8,
-                        "threshold": 0.5,
-                        "mode": "shadow",
-                    }
-                ]
-            },
-        )
+        return FakeResponse(200, results(model_block()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    results = fw.classify_batch(["first"], shadow_mode=True)
+    decisions = fw.classify_batch(["first"], shadow_mode=True)
 
-    assert results[0].prediction == "MALICIOUS"
-    assert results[0].threshold == 0.5
+    assert decisions == [BlockResult(action="block", source="model", mode="shadow")]
 
 
 def test_classify_batch_rejects_bad_lengths():
@@ -808,7 +747,7 @@ def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         calls.append({"url": url, **kwargs})
-        return FakeResponse(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})
+        return FakeResponse(200, results(decision()))
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
@@ -821,7 +760,7 @@ def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
         request_id="event-uuid",
     )
 
-    assert result.prediction == "BENIGN"
+    assert result.action == "allow"
     assert len(calls) == 1
     body = json.loads(calls[0]["data"])
     assert body == {
@@ -841,218 +780,152 @@ def test_classify_sends_long_event_once_with_canonical_metadata(monkeypatch):
     }
 
 
-def test_classify_requires_backend_prediction(monkeypatch):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
+MALFORMED_BODIES = [
+    ({}, "missing required 'prediction' field"),
+    ({"action": "allow"}, "missing required 'prediction' field"),
+    ({"detail": "accepted"}, "missing required 'prediction' field"),
+    ({"results": None}, "'results' must be a list"),
+    ({"results": {"action": "allow"}}, "'results' must be a list"),
+    ({"results": []}, "results length 0 does not match texts length 1"),
+    (results(decision(), decision()), "results length 2 does not match texts length 1"),
+    ({"results": ["allow"]}, "missing required 'action' string"),
+    ({"results": [{}]}, "missing required 'action' string"),
+    ({"results": [{"action": None}]}, "missing required 'action' string"),
+    ({"results": [{"action": 1}]}, "missing required 'action' string"),
+    ({"results": [{"action": ["allow"]}]}, "missing required 'action' string"),
+]
 
-    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
-        return FakeResponse(200, {"score": 0.99, "threshold": 0.5})
 
-    monkeypatch.setattr(fw._session, "post", fake_post)
+@pytest.mark.parametrize(("body", "message"), MALFORMED_BODIES)
+def test_classify_rejects_malformed_response_before_callbacks(monkeypatch, body, message):
+    events: list[ClassifyEvent] = []
+    fw = Firewall(
+        api_key="sk", api_url=TEST_API_URL, shadow_mode=True, on_classify=events.append
+    )
+    monkeypatch.setattr(
+        fw._session, "post", lambda *_args, **_kwargs: FakeResponse(200, body)
+    )
 
-    with pytest.raises(ValueError, match="missing required 'prediction' field"):
-        fw.classify("missing prediction")
+    with pytest.raises(ValueError, match=message):
+        fw.classify("malformed")
+
+    assert events == []
 
 
-def test_optional_outcome_fields(monkeypatch):
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (results(decision()), "results length 1 does not match texts length 2"),
+        (results(decision(), {"source": "model"}), "missing required 'action' string"),
+        ({"results": None, "predictions": [v1(), v1()]}, "'results' must be a list"),
+        ({"predictions": [v1(), {"score": 0.5}]}, "missing required 'prediction' field"),
+        ({"predictions": [v1()]}, "results length 1 does not match texts length 2"),
+        (v1(), "results length 1 does not match texts length 2"),
+    ],
+)
+def test_classify_batch_rejects_malformed_response_before_callbacks(monkeypatch, body, message):
+    events: list[ClassifyEvent] = []
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="shadow", on_classify=events.append)
+    monkeypatch.setattr(
+        fw._session, "post", lambda *_args, **_kwargs: FakeResponse(200, body)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        fw.classify_batch(["first", "second"])
+
+    assert events == []
+
+
+def test_surfaces_decision_evidence(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, shadow_mode=True)
 
     def fake_post(url: str, **kwargs: Any) -> FakeResponse:
         return FakeResponse(
             200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "mode": "shadow",
-                "primary_outcome": OUTCOME_SECRET_EXPOSURE,
-                "outcome_scores": {OUTCOME_SECRET_EXPOSURE: 0.8},
-                "detector_scores": {OUTCOME_SECRET_EXPOSURE: 1.0},
-                "detector_counts": {OUTCOME_SECRET_EXPOSURE: 2},
-            },
+            results(
+                model_block(
+                    confidence="high",
+                    severity="moderate",
+                    outcome=OUTCOME_SECRET_EXPOSURE,
+                )
+            ),
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
     result = fw.classify("leak token")
 
-    assert result.primary_outcome == OUTCOME_SECRET_EXPOSURE
-    assert result.outcome_scores == {OUTCOME_SECRET_EXPOSURE: 0.8}
-    assert result.detector_scores == {OUTCOME_SECRET_EXPOSURE: 1.0}
-    assert result.detector_counts == {OUTCOME_SECRET_EXPOSURE: 2}
+    assert result == BlockResult(
+        action="block",
+        source="model",
+        confidence="high",
+        severity="moderate",
+        outcome=OUTCOME_SECRET_EXPOSURE,
+        mode="shadow",
+    )
+
+
+UNFAMILIAR_EVIDENCE = {
+    "source": "policy_pack",
+    "confidence": "certain",
+    "severity": "catastrophic",
+    "outcome": "future_policy_violation",
+}
 
 
 @pytest.mark.parametrize("mode", ["warn", "shadow"])
-def test_preserves_future_outcome_fields_for_nonblocking_modes(monkeypatch, mode):
+def test_surfaces_unfamiliar_evidence_for_nonblocking_modes(monkeypatch, mode):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
-    future = "future_policy_violation"
 
     monkeypatch.setattr(
         fw._session,
         "post",
         lambda *_args, **_kwargs: FakeResponse(
-            200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "primary_outcome": future,
-                "outcome_scores": {future: 0.8},
-                "detector_scores": {future: 1.0},
-                "detector_counts": {future: 2},
-            },
+            200, results(decision("block", **UNFAMILIAR_EVIDENCE))
         ),
     )
 
     result = fw.classify("future attack", mode=mode)
 
-    assert result.primary_outcome == future
-    assert result.outcome_scores == {future: 0.8}
-    assert result.detector_scores == {future: 1.0}
-    assert result.detector_counts == {future: 2}
+    assert result == BlockResult(action="block", mode=mode, **UNFAMILIAR_EVIDENCE)
 
 
-def test_future_outcome_explicit_block_raises_with_result(monkeypatch):
+def test_unfamiliar_evidence_explicit_block_raises_with_result(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
-    future = "future_policy_violation"
 
     monkeypatch.setattr(
         fw._session,
         "post",
         lambda *_args, **_kwargs: FakeResponse(
-            200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "primary_outcome": future,
-            },
+            200, results(decision("block", **UNFAMILIAR_EVIDENCE))
         ),
     )
 
     with pytest.raises(FirewallBlockedException) as exc_info:
         fw.classify("future attack", mode="block")
 
-    assert exc_info.value.result.primary_outcome == future
+    assert exc_info.value.result == BlockResult(
+        action="block", mode="block", **UNFAMILIAR_EVIDENCE
+    )
 
 
-def test_batch_preserves_and_enforces_future_outcomes(monkeypatch):
+def test_batch_surfaces_and_enforces_unfamiliar_evidence(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
-    future = "future_policy_violation"
 
     monkeypatch.setattr(
         fw._session,
         "post",
         lambda *_args, **_kwargs: FakeResponse(
-            200,
-            {
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.91,
-                        "threshold": 0.5,
-                        "primary_outcome": future,
-                        "outcome_scores": {future: 0.8},
-                        "detector_scores": {future: 1.0},
-                        "detector_counts": {future: 2},
-                    }
-                ]
-            },
+            200, results(decision("block", **UNFAMILIAR_EVIDENCE))
         ),
     )
 
-    results = fw.classify_batch(["future attack"], mode="warn")
-    assert results[0].primary_outcome == future
-    assert results[0].outcome_scores == {future: 0.8}
+    decisions = fw.classify_batch(["future attack"], mode="warn")
+    assert decisions == [BlockResult(action="block", mode="warn", **UNFAMILIAR_EVIDENCE)]
 
     with pytest.raises(BatchFirewallBlockedException) as exc_info:
         fw.classify_batch(["future attack"], mode="block")
-    assert exc_info.value.blocked[0].result.primary_outcome == future
-
-
-@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
-def test_sync_decoding_accepts_nonnegative_detector_counts(batch):
-    detector_counts = {OUTCOME_SECRET_EXPOSURE: 0, "future_policy_violation": 2}
-    result_body = {
-        "prediction": "BENIGN",
-        "score": 0.1,
-        "threshold": 0.5,
-        "detector_counts": detector_counts,
-    }
-    body = {"predictions": [result_body]} if batch else result_body
-    adapter = RecordingAdapter([(200, body)])
-    session = requests.Session()
-    session.mount("https://api.test.invalid/", adapter)
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session)
-
-    result = fw.classify_batch(["safe"])[0] if batch else fw.classify("safe")
-
-    assert result.detector_counts == detector_counts
-
-
-@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
-@pytest.mark.parametrize(
-    "outcome",
-    [OUTCOME_SECRET_EXPOSURE, "future_policy_violation"],
-    ids=["known", "future"],
-)
-def test_sync_decoding_rejects_negative_detector_counts_before_callbacks(batch, outcome):
-    result_body = {
-        "prediction": "BENIGN",
-        "score": 0.1,
-        "threshold": 0.5,
-        "detector_counts": {outcome: -1},
-    }
-    body = {"predictions": [result_body]} if batch else result_body
-    adapter = RecordingAdapter([(200, body)])
-    session = requests.Session()
-    session.mount("https://api.test.invalid/", adapter)
-    events: list[ClassifyEvent] = []
-    fw = Firewall(
-        api_key="sk",
-        api_url=TEST_API_URL,
-        session=session,
-        on_classify=events.append,
-    )
-
-    with pytest.raises(ValueError, match="expected nonnegative int"):
-        if batch:
-            fw.classify_batch(["malformed"])
-        else:
-            fw.classify("malformed")
-
-    assert events == []
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("primary_outcome", ""),
-        ("primary_outcome", " \t"),
-        ("primary_outcome", 7),
-        ("outcome_scores", {"benign": 0.8}),
-        ("detector_scores", {"": 0.8}),
-        ("detector_counts", {9: 1}),
-    ],
-)
-def test_rejects_malformed_outcome_fields(monkeypatch, field, value):
-    fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="shadow")
-
-    monkeypatch.setattr(
-        fw._session,
-        "post",
-        lambda *_args, **_kwargs: FakeResponse(
-            200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                field: value,
-            },
-        ),
-    )
-
-    with pytest.raises(ValueError, match=f"invalid {field}"):
-        fw.classify("x")
+    assert exc_info.value.blocked[0].result.outcome == "future_policy_violation"
 
 
 def test_retries_retryable_status(monkeypatch):
@@ -1060,7 +933,7 @@ def test_retries_retryable_status(monkeypatch):
     responses = [
         FakeResponse(429, "rate limited"),
         FakeResponse(503, "unavailable"),
-        FakeResponse(200, {"prediction": "BENIGN", "score": 0.01, "threshold": 0.5}),
+        FakeResponse(200, results(decision())),
     ]
     sleeps: list[float] = []
 
@@ -1072,7 +945,7 @@ def test_retries_retryable_status(monkeypatch):
 
     result = fw.classify("hello")
 
-    assert result.prediction == "BENIGN"
+    assert result.action == "allow"
     assert sleeps == [1, 2]
 
 

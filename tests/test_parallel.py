@@ -47,7 +47,7 @@ def test_protect_runs_the_operation_while_its_input_is_classified(monkeypatch):
 
 
 def test_protect_withholds_the_result_of_a_blocked_input(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     held.release.set()
     fw = _firewall(monkeypatch, held)
     finished = []
@@ -60,7 +60,7 @@ def test_protect_withholds_the_result_of_a_blocked_input(monkeypatch):
 
 
 def test_protect_checks_extracted_output_before_returning_it(monkeypatch):
-    held = HeldClassification("BENIGN", "MALICIOUS")
+    held = HeldClassification("allow", "block")
     held.release.set()
     fw = _firewall(monkeypatch, held)
 
@@ -72,7 +72,7 @@ def test_protect_checks_extracted_output_before_returning_it(monkeypatch):
 
 
 def test_protect_in_shadow_returns_before_the_verdict(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     events: list[ClassifyEvent] = []
     fw = _firewall(monkeypatch, held, mode="shadow", on_classify=events.append)
 
@@ -225,7 +225,7 @@ async def test_async_protect_runs_the_operation_while_its_input_is_classified(mo
 
 @pytest.mark.asyncio
 async def test_async_protect_cancels_the_operation_when_the_block_lands_first(monkeypatch):
-    held = AsyncHeldClassification("MALICIOUS")
+    held = AsyncHeldClassification("block")
     held.release.set()
     fw = _async_firewall(monkeypatch, held)
     cancelled = asyncio.Event()
@@ -246,7 +246,7 @@ async def test_async_protect_cancels_the_operation_when_the_block_lands_first(mo
 
 @pytest.mark.asyncio
 async def test_async_protect_in_shadow_returns_before_the_verdict_and_close_drains(monkeypatch):
-    held = AsyncHeldClassification("MALICIOUS")
+    held = AsyncHeldClassification("block")
     events: list[ClassifyEvent] = []
     fw = _async_firewall(monkeypatch, held, mode="shadow", on_classify=events.append)
 

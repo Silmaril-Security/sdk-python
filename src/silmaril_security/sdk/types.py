@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from silmaril_security.sdk.hooks import HookLabel
-from silmaril_security.sdk.outcomes import HarmfulOutcomeValue, PrimaryOutcomeValue
+from silmaril_security.sdk.outcomes import HarmfulOutcomeValue
 
-Prediction = Literal["BENIGN", "MALICIOUS"]
+DecisionAction = Literal["allow", "block"]
+DecisionSource = Literal["model", "governance"]
+DecisionConfidence = Literal["very_low", "low", "medium", "high", "very_high"]
+DecisionSeverity = Literal["minimal", "low", "moderate", "high", "critical"]
 FirewallMode = Literal["shadow", "warn", "block"]
 ReviewLevel = Literal["standard", "deep"]
 ClassificationMetadata = Mapping[str, Any]
@@ -46,20 +49,21 @@ class GovernanceDecision:
 
 @dataclass(frozen=True)
 class BlockResult:
-    """Result of a firewall classification call."""
+    """Decision of a firewall classification call."""
 
-    prediction: Prediction
-    score: float
-    threshold: float
-    primary_outcome: PrimaryOutcomeValue | None = None
-    outcome_scores: dict[HarmfulOutcomeValue, float] | None = None
-    detector_scores: dict[HarmfulOutcomeValue, float] | None = None
-    detector_counts: dict[HarmfulOutcomeValue, int] | None = None
-    # None when the response omits mode and no explicit override was requested.
-    mode: FirewallMode | None = None
+    action: DecisionAction
+    source: DecisionSource | str | None = None
+    confidence: DecisionConfidence | str | None = None
+    severity: DecisionSeverity | str | None = None
+    outcome: HarmfulOutcomeValue | None = None
     governance: GovernanceDecision | None = None
-    # Applied review setting acknowledged for an explicit selection; never judge execution.
+    model_id: str | None = None
     review: ReviewLevel | None = None
+    mode: FirewallMode | None = None
+
+    @property
+    def blocked(self) -> bool:
+        return self.action != "allow"
 
 
 @dataclass(frozen=True, init=False)

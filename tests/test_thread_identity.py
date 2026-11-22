@@ -62,7 +62,7 @@ def firewall(monkeypatch, *, asynchronous=False):
 
     def record(text, **kwargs):
         captured.append((text, kwargs))
-        return BlockResult("BENIGN", 0.1, 0.5, mode="block")
+        return BlockResult("allow", mode="block")
 
     async def arecord(text, **kwargs):
         await asyncio.sleep(0)
@@ -184,7 +184,7 @@ def test_real_callback_failure_and_block_cleanup(monkeypatch):
     with pytest.raises(RuntimeError, match="classifier failed"):
         EchoModel().invoke("safe", config={"callbacks": [handler], "configurable": {"thread_id": "broken"}})
     assert handler._thread_runs._runs == {}
-    monkeypatch.setattr(fw, "_classify_raw", lambda *a, **k: BlockResult("MALICIOUS", 0.9, 0.5, mode="block"))
+    monkeypatch.setattr(fw, "_classify_raw", lambda *a, **k: BlockResult("block", mode="block"))
     with pytest.raises(Exception, match="blocked"):
         EchoModel().invoke("safe", config={"callbacks": [handler], "configurable": {"thread_id": "blocked"}})
     assert handler._thread_runs._runs == {}

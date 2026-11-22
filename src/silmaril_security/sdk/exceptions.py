@@ -13,6 +13,15 @@ from silmaril_security.sdk.hooks import HookLabel
 from silmaril_security.sdk.types import BlockedBatchItem, BlockResult, ReviewLevel
 
 _MAX_PROMPT_DISPLAY_LEN = 100
+_EVIDENCE_FIELDS = ("action", "source", "confidence", "severity", "outcome")
+
+
+def _evidence(result: BlockResult) -> str:
+    return ", ".join(
+        f"{name}={value}"
+        for name in _EVIDENCE_FIELDS
+        if (value := getattr(result, name)) is not None
+    )
 
 
 class SilmarilApiError(Exception):
@@ -49,16 +58,12 @@ class FirewallBlockedException(Exception):
     def __init__(
         self,
         *,
-        score: float,
-        threshold: float,
         prompt_text: str,
         hook: HookLabel = HookLabel.UNKNOWN,
         tool_name: str | None = None,
-        result: BlockResult | None = None,
+        result: BlockResult,
         run_id: UUID | str | None = None,
     ) -> None:
-        self.score = score
-        self.threshold = threshold
         self.prompt_text = prompt_text
         self.hook = hook
         self.tool_name = tool_name
@@ -70,11 +75,7 @@ class FirewallBlockedException(Exception):
         truncated = self.prompt_text
         if len(truncated) > _MAX_PROMPT_DISPLAY_LEN:
             truncated = truncated[:_MAX_PROMPT_DISPLAY_LEN] + "..."
-        return (
-            "Request blocked by Silmaril Firewall "
-            f"(score={self.score:.4f}, threshold={self.threshold:.4f}): "
-            f"{truncated!r}"
-        )
+        return f"Request blocked by Silmaril Firewall ({_evidence(self.result)}): {truncated!r}"
 
 
 class BatchFirewallBlockedException(Exception):
@@ -95,8 +96,7 @@ class BatchFirewallBlockedException(Exception):
             item = self.blocked[0]
             return (
                 "Batch request blocked by Silmaril Firewall "
-                f"at index {item.index} "
-                f"(score={item.result.score:.4f}, threshold={item.result.threshold:.4f})"
+                f"at index {item.index} ({_evidence(item.result)})"
             )
         return f"Batch requests blocked by Silmaril Firewall ({len(self.blocked)} items)"
 
