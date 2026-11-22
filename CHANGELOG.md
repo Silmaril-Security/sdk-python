@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.1
+
+- Reject missing, non-numeric, non-finite, or out-of-range verdict `score` and
+  `threshold` values, and reject `outcome_scores` and `detector_scores` values
+  outside the inclusive `0` to `1` range.
+
 ## 0.10.0
 
 - Classify model output by default in the LangChain handlers: `on_llm_end` is
