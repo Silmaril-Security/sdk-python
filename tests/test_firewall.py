@@ -198,8 +198,8 @@ def test_classify_preserves_governance_response_evidence_and_legacy_shape():
                         "action": "allow",
                         "policy_version": "schema6",
                         "resource": resource,
-                        "identity_revision": "catalog-10",
-                        "reason": "future_identity_reason",
+                        "identity_revision": "\u00a0\ufeff\u0085",
+                        "reason": "\u001cfuture_identity_reason\u3000",
                     },
                 },
             ),
@@ -228,7 +228,8 @@ def test_classify_preserves_governance_response_evidence_and_legacy_shape():
 
     future = fw.classify("future reason")
     assert future.governance is not None
-    assert future.governance.reason == "future_identity_reason"
+    assert future.governance.identity_revision == "\u00a0\ufeff\u0085"
+    assert future.governance.reason == "\u001cfuture_identity_reason\u3000"
     assert fw.classify("legacy").governance is None
 
 
@@ -281,10 +282,15 @@ def test_governance_response_accepts_absent_optional_evidence(evidence):
         ("identity_revision", {}),
         ("identity_revision", ""),
         ("identity_revision", " \t"),
+        (
+            "identity_revision",
+            "\u001c\u001d\u001e\u001f\u0085\u00a0\u1680\u2003\u2028\u2029\u202f\u205f\u3000",
+        ),
         ("reason", 1),
         ("reason", {}),
         ("reason", ""),
         ("reason", " \t"),
+        ("reason", "\u001c\u0085\u00a0\u2007\u2029\u3000"),
     ],
 )
 def test_governance_response_rejects_malformed_string_evidence(field, value):
