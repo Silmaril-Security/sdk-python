@@ -260,7 +260,7 @@ jobs:
         id: configured
         env:
           APP_KEY: ${{ secrets.CUSTOMER_TESTS_APP_PRIVATE_KEY }}
-          APP_ID: ${{ vars.CUSTOMER_TESTS_APP_CLIENT_ID }}
+          APP_ID: ${{ secrets.CUSTOMER_TESTS_APP_CLIENT_ID }}
         run: |
           if [ -n "$APP_KEY" ] && [ -n "$APP_ID" ]; then
             echo 'ready=true' >> "$GITHUB_OUTPUT"
@@ -275,7 +275,7 @@ jobs:
         id: reader
         uses: actions/create-github-app-token@v3
         with:
-          client-id: ${{ vars.CUSTOMER_TESTS_APP_CLIENT_ID }}
+          client-id: ${{ secrets.CUSTOMER_TESTS_APP_CLIENT_ID }}
           private-key: ${{ secrets.CUSTOMER_TESTS_APP_PRIVATE_KEY }}
           owner: Silmaril-Security
           repositories: SilmarilCustomerTests,firewall-ui,silmaril-firewall-mcp
@@ -310,17 +310,17 @@ jobs:
           source-sha: ${{ github.sha }}
           framework-sha: 1a77a9bfcb634c2851fb966261f4413e1542e158
         env:
-          SILMARIL_API_URL: ${{ vars.CUSTOMER_API_URL }}
+          SILMARIL_API_URL: ${{ secrets.CUSTOMER_API_URL }}
           SILMARIL_API_KEY: ${{ secrets.CUSTOMER_API_KEY }}
-          CUSTOMER_BACKEND_ID: ${{ vars.CUSTOMER_BACKEND_ID }}
+          CUSTOMER_BACKEND_ID: ${{ secrets.CUSTOMER_BACKEND_ID }}
           CUSTOMER_TESTS_READ_TOKEN: ${{ steps.reader.outputs.token }}
-          CUSTOMER_UI_URL: ${{ vars.CUSTOMER_UI_URL }}
+          CUSTOMER_UI_URL: ${{ secrets.CUSTOMER_UI_URL }}
           CUSTOMER_LOGIN_EMAIL: ${{ secrets.CUSTOMER_LOGIN_EMAIL }}
           CUSTOMER_LOGIN_PASSWORD: ${{ secrets.CUSTOMER_LOGIN_PASSWORD }}
-          CUSTOMER_ORGANIZATION_ID: ${{ vars.CUSTOMER_ORGANIZATION_ID }}
+          CUSTOMER_ORGANIZATION_ID: ${{ secrets.CUSTOMER_ORGANIZATION_ID }}
           CUSTOMER_UI_STORAGE_STATE_JSON: ${{ secrets.CUSTOMER_UI_STORAGE_STATE_JSON }}
-          CUSTOMER_FIREWALL_ID: ${{ vars.CUSTOMER_FIREWALL_ID }}
-          CUSTOMER_MCP_URL: ${{ vars.CUSTOMER_MCP_URL }}
+          CUSTOMER_FIREWALL_ID: ${{ secrets.CUSTOMER_FIREWALL_ID }}
+          CUSTOMER_MCP_URL: ${{ secrets.CUSTOMER_MCP_URL }}
           CUSTOMER_MCP_ACCESS_TOKEN: ${{ secrets.CUSTOMER_MCP_ACCESS_TOKEN }}
       - name: Upload customer evidence
         if: always()
