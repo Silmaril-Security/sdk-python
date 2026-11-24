@@ -31,7 +31,7 @@ def test_outcome_taxonomy_exports_ordered_values():
         "story_script_generation",
         "game_generation",
         "website_generation",
-        "clickup_terms_violation",
+        "abuse",
         "traditional_ai_abuse",
     )
     assert HARMFUL_OUTCOMES == PRIMARY_OUTCOMES[1:]
