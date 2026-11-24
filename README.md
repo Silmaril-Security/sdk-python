@@ -42,7 +42,7 @@ pip install silmaril-security-sdk
 For reproducible installs, pin a tagged release:
 
 ```sh
-pip install silmaril-security-sdk==0.10.1
+pip install silmaril-security-sdk==0.11.0
 ```
 
 Use a GitHub branch install only when you intentionally want the current branch
@@ -271,7 +271,7 @@ result for application routing instead of raising:
 ```python
 from silmaril_security.sdk import (
     HookLabel,
-    OUTCOME_CLICKUP_TERMS_VIOLATION,
+    OUTCOME_ABUSE,
     OUTCOME_CODE_GENERATION,
     OUTCOME_CONTROL_ABUSE,
     OUTCOME_GAME_GENERATION,
@@ -303,7 +303,7 @@ elif result.primary_outcome in {
     OUTCOME_STORY_SCRIPT_GENERATION,
     OUTCOME_GAME_GENERATION,
     OUTCOME_WEBSITE_GENERATION,
-    OUTCOME_CLICKUP_TERMS_VIOLATION,
+    OUTCOME_ABUSE,
     OUTCOME_TRADITIONAL_AI_ABUSE,
 }:
     apply_tenant_policy(result)
@@ -323,7 +323,7 @@ Outcome taxonomy:
 - `story_script_generation`: generation of narrative prose, dialogue, scripts, or story artifacts.
 - `game_generation`: generation of a game, quest, level, mechanic, or playable experience.
 - `website_generation`: generation of a website, landing page, storefront, or web experience.
-- `clickup_terms_violation`: content or actions that violate the configured ClickUp tenant policy.
+- `abuse`: content or actions that violate the tenant's acceptable-use policy.
 - `traditional_ai_abuse`: unsafe AI assistance outside the concrete security outcome classes.
 
 ## Backend Thresholding
