@@ -751,14 +751,16 @@ async def test_async_langchain_bridge_inherits_client_review(monkeypatch, acknow
 
     recorded: list[dict[str, Any]] = []
 
-    async def exchange(self: AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
+    async def post_json(
+        self: AsyncClient, client: Any, url: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         recorded.append(payload)
         body = _benign()
         if acknowledge:
             body["review"] = payload["review"]
         return body
 
-    monkeypatch.setattr(AsyncClient, "_exchange", exchange)
+    monkeypatch.setattr(AsyncClient, "_post_json", post_json)
     firewall_events: list[Any] = []
     callback_events: list[Any] = []
     fw = Firewall(

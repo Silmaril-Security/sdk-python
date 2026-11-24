@@ -526,11 +526,20 @@ async def test_fallback_keeps_the_review_acknowledgement_requirement(kind):
         (v1(governance={"action": "block"}), "governance policy_version"),
     ],
 )
-async def test_malformed_version_1_fallback_is_rejected(kind, body, message):
-    runtime = connect(kind, [(404, "no such route"), (200, body)], mode="shadow")
+async def test_malformed_version_1_fallback_is_rejected_and_not_remembered(kind, body, message):
+    runtime = connect(
+        kind,
+        [(404, "no such route"), (200, body), (200, results(decision()))],
+        mode="shadow",
+    )
 
     with pytest.raises(ValueError, match=message):
         await runtime.call("classify", "hello")
+    after = await runtime.call("classify", "hello")
+
+    assert after == BlockResult(action="allow", mode="shadow")
+    assert runtime.urls == [V2_URL, V1_URL, V2_URL]
+    assert runtime.client._route.legacy is False
 
 
 @pytest.mark.parametrize("body", [None, [], "BENIGN", 7])

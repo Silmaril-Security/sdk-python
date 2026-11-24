@@ -17,14 +17,14 @@ def test_single_governance_wire_decision_and_legacy(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
     payloads = []
 
-    def post(payload):
+    def post(url, payload):
         payloads.append(payload)
         if len(payloads) == 1:
             return results(governance_block(
                 {"action": "block", "policy_version": "v2", "rule_id": "rule-1"}))
         return results(decision())
 
-    monkeypatch.setattr(fw, "_exchange", post)
+    monkeypatch.setattr(fw, "_post_json", post)
     context = GovernanceContext(agent="agent-1", resource=GovernanceResource(kind="mcp_tool", id="search", parent_id="server-1"))
     with pytest.raises(FirewallBlockedException) as exc:
         fw.classify("search", governance=context)
@@ -45,11 +45,11 @@ async def test_async_batch_governance(monkeypatch):
     fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL)
     payloads = []
 
-    async def post(payload):
+    async def post(client, url, payload):
         payloads.append(payload)
         return results(governance_block({"action": "block", "policy_version": "v2"}), decision())
 
-    monkeypatch.setattr(fw, "_exchange", post)
+    monkeypatch.setattr(fw, "_post_json", post)
     decisions = await fw.classify_batch(
         ["a", "b"], governance=[GovernanceContext(agent="agent-1"), None], mode="warn")
     assert decisions[0].governance.action == "block"
@@ -69,21 +69,21 @@ async def test_async_batch_governance(monkeypatch):
 ])
 def test_invalid_resource_never_reaches_transport(monkeypatch, resource):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
-    def unexpected(payload):
+    def unexpected(url, payload):
         pytest.fail("invalid canonical resource reached transport")
-    monkeypatch.setattr(fw, "_exchange", unexpected)
+    monkeypatch.setattr(fw, "_post_json", unexpected)
     with pytest.raises(ValueError):
         fw.classify("synthetic", governance=GovernanceContext(resource=resource))
 
 
 def test_resource_deny_uses_producer_fields_not_caller_metadata(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
-    def producer(payload):
+    def producer(url, payload):
         assert "agent" not in payload
         denied = payload.get("resource") == {"kind": "plugin", "id": "blocked-plugin"}
         governance = {"action": "block" if denied else "allow", "policy_version": "fixture"}
         return results(governance_block(governance) if denied else decision(governance=governance))
-    monkeypatch.setattr(fw, "_exchange", producer)
+    monkeypatch.setattr(fw, "_post_json", producer)
     with pytest.raises(FirewallBlockedException):
         fw.classify("synthetic", governance=GovernanceContext(resource=GovernanceResource(kind="plugin", id="blocked-plugin")))
     result = fw.classify("synthetic", metadata={"silmaril": {"governance": {"resource": {"kind": "plugin", "id": "blocked-plugin"}}}})
@@ -93,9 +93,9 @@ def test_resource_deny_uses_producer_fields_not_caller_metadata(monkeypatch):
 @pytest.mark.asyncio
 async def test_async_nullable_resources_preserve_batch_order(monkeypatch):
     fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, mode="warn")
-    async def producer(payload):
+    async def producer(client, url, payload):
         assert payload["resources"] == [None, {"kind": "plugin", "id": "blocked-plugin"}, None]
         return results(*(decision() for _ in payload["texts"]))
-    monkeypatch.setattr(fw, "_exchange", producer)
+    monkeypatch.setattr(fw, "_post_json", producer)
     await fw.classify_batch(["a", "b", "c"], governance=[None, GovernanceContext(resource=GovernanceResource(kind="plugin", id="blocked-plugin")), GovernanceContext(agent="attribution-only")])
     await fw.aclose()

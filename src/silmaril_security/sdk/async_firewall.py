@@ -403,8 +403,8 @@ class AsyncFirewall:
             mode=mode,
             review=requested_review,
         )
-        return _block_results(
-            await self._exchange(payload), expected_length=1, mode=mode, review=requested_review
+        return (
+            await self._decide(payload, expected_length=1, mode=mode, review=requested_review)
         )[0]
 
     async def _classify_batch_raw(
@@ -430,26 +430,31 @@ class AsyncFirewall:
             mode=mode,
             review=requested_review,
         )
-        return _block_results(
-            await self._exchange(payload),
-            expected_length=len(text_list),
-            mode=mode,
-            review=requested_review,
+        return await self._decide(
+            payload, expected_length=len(text_list), mode=mode, review=requested_review
         )
 
-    async def _exchange(self, payload: dict[str, Any]) -> Any:
+    async def _decide(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_length: int,
+        mode: FirewallMode | None,
+        review: ReviewLevel | None,
+    ) -> list[BlockResult]:
+        decode = partial(_block_results, expected_length=expected_length, mode=mode, review=review)
         client = self._ensure_client()
         self._begin_request()
         try:
             if not self._route.legacy:
                 try:
-                    return await self._post_json(client, self._route.v2_url, payload)
+                    return decode(await self._post_json(client, self._route.v2_url, payload))
                 except SilmarilApiError as error:
                     if error.status not in FALLBACK_STATUS_CODES:
                         raise
-            body = await self._post_json(client, self._route.v1_url, payload)
+            results = decode(await self._post_json(client, self._route.v1_url, payload))
             self._route.legacy = True
-            return body
+            return results
         finally:
             self._end_request()
 

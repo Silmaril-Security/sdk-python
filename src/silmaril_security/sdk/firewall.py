@@ -686,9 +686,7 @@ class Firewall:
             mode=mode,
             review=requested_review,
         )
-        return _block_results(
-            self._exchange(payload), expected_length=1, mode=mode, review=requested_review
-        )[0]
+        return self._decide(payload, expected_length=1, mode=mode, review=requested_review)[0]
 
     def _classify_batch_raw(
         self,
@@ -713,23 +711,28 @@ class Firewall:
             mode=mode,
             review=requested_review,
         )
-        return _block_results(
-            self._exchange(payload),
-            expected_length=len(text_list),
-            mode=mode,
-            review=requested_review,
+        return self._decide(
+            payload, expected_length=len(text_list), mode=mode, review=requested_review
         )
 
-    def _exchange(self, payload: dict[str, Any]) -> Any:
+    def _decide(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_length: int,
+        mode: FirewallMode | None,
+        review: ReviewLevel | None,
+    ) -> list[BlockResult]:
+        decode = partial(_block_results, expected_length=expected_length, mode=mode, review=review)
         if not self._route.legacy:
             try:
-                return self._post_json(self._route.v2_url, payload)
+                return decode(self._post_json(self._route.v2_url, payload))
             except SilmarilApiError as error:
                 if error.status not in FALLBACK_STATUS_CODES:
                     raise
-        body = self._post_json(self._route.v1_url, payload)
+        results = decode(self._post_json(self._route.v1_url, payload))
         self._route.legacy = True
-        return body
+        return results
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> Any:
         body = json.dumps(payload)

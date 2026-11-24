@@ -139,7 +139,7 @@ def test_langchain_requested_warn_survives_mode_less_response(monkeypatch):
     )
     handler = fw.as_langchain_handler()
 
-    monkeypatch.setattr(fw, "_exchange", lambda payload: results(model_block()))
+    monkeypatch.setattr(fw, "_post_json", lambda url, payload: results(model_block()))
 
     handler.on_chat_model_start(
         serialized={},
@@ -228,11 +228,11 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     payloads = []
 
-    async def fake_exchange(self, payload):
+    async def fake_post_json(self, client, url, payload):
         payloads.append(payload)
         return results(decision())
 
-    monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._exchange", fake_exchange)
+    monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._post_json", fake_post_json)
 
     result = await _async_classify_raw(
         fw,
@@ -267,10 +267,10 @@ async def test_async_langchain_requested_warn_survives_mode_less_response(monkey
     )
     handler = fw.as_async_langchain_handler()
 
-    async def fake_exchange(self, payload):
+    async def fake_post_json(self, client, url, payload):
         return results(model_block())
 
-    monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._exchange", fake_exchange)
+    monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._post_json", fake_post_json)
 
     await handler.on_chat_model_start(
         serialized={},

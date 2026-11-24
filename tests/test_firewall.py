@@ -583,7 +583,7 @@ def test_mode_less_response_preserves_absence():
 def test_requested_warn_is_preserved_when_legacy_backend_omits_mode(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, mode="warn")
 
-    monkeypatch.setattr(fw, "_exchange", lambda payload: v1("MALICIOUS"))
+    monkeypatch.setattr(fw, "_post_json", lambda url, payload: v1("MALICIOUS"))
 
     result = fw.classify("attack")
 
