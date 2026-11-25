@@ -1,0 +1,509 @@
+[
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        }
+      ]
+    },
+    "name": "allow",
+    "v1": {
+      "head_scores": {},
+      "malicious_score": 0.0,
+      "model_id": "silmaril-cascade-1-6",
+      "outcome_scores": {},
+      "prediction": "BENIGN",
+      "primary_outcome": "benign",
+      "score": 0.0,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        }
+      ]
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "secret_exposure",
+          "severity": null,
+          "source": "model"
+        }
+      ]
+    },
+    "name": "model_block",
+    "v1": {
+      "head_scores": {},
+      "malicious_score": 1.0,
+      "model_id": "silmaril-cascade-1-6",
+      "outcome_scores": {
+        "control_abuse": 0.25,
+        "secret_exposure": 0.75
+      },
+      "prediction": "MALICIOUS",
+      "primary_outcome": "secret_exposure",
+      "score": 1.0,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "secret_exposure",
+          "severity": null,
+          "source": "model"
+        }
+      ]
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": "model"
+        }
+      ]
+    },
+    "name": "model_block_without_outcome",
+    "v1": {
+      "head_scores": {},
+      "malicious_score": 0.75,
+      "model_id": "silmaril-cascade-1-6",
+      "outcome_scores": {},
+      "prediction": "MALICIOUS",
+      "primary_outcome": "system_compromise",
+      "score": 0.75,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": "model"
+        }
+      ]
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        }
+      ],
+      "review": "deep"
+    },
+    "name": "review_echo",
+    "v1": {
+      "head_scores": {},
+      "malicious_score": 0.0,
+      "model_id": "silmaril-cascade-1-6",
+      "outcome_scores": {},
+      "prediction": "BENIGN",
+      "primary_outcome": "benign",
+      "review": "deep",
+      "score": 0.0,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        }
+      ],
+      "review": "deep"
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": {
+            "action": "allow",
+            "identity_revision": "rev-1",
+            "policy_version": "policy-9",
+            "resource": {
+              "id": "search",
+              "kind": "mcp_tool",
+              "parent_id": "arxiv-mcp-server"
+            },
+            "rule_id": "block-shell"
+          },
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        }
+      ]
+    },
+    "name": "governance_allow",
+    "v1": {
+      "governance": {
+        "action": "allow",
+        "identity_revision": "rev-1",
+        "policy_version": "policy-9",
+        "resource": {
+          "id": "search",
+          "kind": "mcp_tool",
+          "parent_id": "arxiv-mcp-server"
+        },
+        "rule_id": "block-shell"
+      },
+      "head_scores": {},
+      "malicious_score": 0.0,
+      "model_id": "silmaril-cascade-1-6",
+      "outcome_scores": {},
+      "prediction": "BENIGN",
+      "primary_outcome": "benign",
+      "score": 0.0,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": {
+            "action": "allow",
+            "identity_revision": "rev-1",
+            "policy_version": "policy-9",
+            "resource": {
+              "id": "search",
+              "kind": "mcp_tool",
+              "parent_id": "arxiv-mcp-server"
+            },
+            "rule_id": "block-shell"
+          },
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        }
+      ]
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": {
+            "action": "block",
+            "identity_revision": "rev-1",
+            "policy_version": "policy-9",
+            "resource": {
+              "id": "search",
+              "kind": "mcp_tool",
+              "parent_id": "arxiv-mcp-server"
+            },
+            "rule_id": "block-shell"
+          },
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": "governance"
+        }
+      ]
+    },
+    "name": "governance_block",
+    "v1": {
+      "governance": {
+        "action": "block",
+        "identity_revision": "rev-1",
+        "policy_version": "policy-9",
+        "resource": {
+          "id": "search",
+          "kind": "mcp_tool",
+          "parent_id": "arxiv-mcp-server"
+        },
+        "rule_id": "block-shell"
+      },
+      "head_scores": {},
+      "malicious_score": 0.0,
+      "model_id": "silmaril-cascade-1-6",
+      "model_prediction": "BENIGN",
+      "outcome_scores": {},
+      "prediction": "MALICIOUS",
+      "primary_outcome": "benign",
+      "score": 0.0,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": {
+            "action": "block",
+            "identity_revision": "rev-1",
+            "policy_version": "policy-9",
+            "resource": {
+              "id": "search",
+              "kind": "mcp_tool",
+              "parent_id": "arxiv-mcp-server"
+            },
+            "rule_id": "block-shell"
+          },
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": "governance"
+        }
+      ]
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": {
+            "action": "block",
+            "identity_revision": "rev-1",
+            "policy_version": "policy-9",
+            "resource": {
+              "id": "search",
+              "kind": "mcp_tool",
+              "parent_id": "arxiv-mcp-server"
+            },
+            "rule_id": "block-shell"
+          },
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "secret_exposure",
+          "severity": null,
+          "source": "model"
+        }
+      ]
+    },
+    "name": "model_and_governance_block",
+    "v1": {
+      "governance": {
+        "action": "block",
+        "identity_revision": "rev-1",
+        "policy_version": "policy-9",
+        "resource": {
+          "id": "search",
+          "kind": "mcp_tool",
+          "parent_id": "arxiv-mcp-server"
+        },
+        "rule_id": "block-shell"
+      },
+      "head_scores": {},
+      "malicious_score": 1.0,
+      "model_id": "silmaril-cascade-1-6",
+      "model_prediction": "MALICIOUS",
+      "outcome_scores": {
+        "control_abuse": 0.25,
+        "secret_exposure": 0.75
+      },
+      "prediction": "MALICIOUS",
+      "primary_outcome": "secret_exposure",
+      "score": 1.0,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": {
+            "action": "block",
+            "identity_revision": "rev-1",
+            "policy_version": "policy-9",
+            "resource": {
+              "id": "search",
+              "kind": "mcp_tool",
+              "parent_id": "arxiv-mcp-server"
+            },
+            "rule_id": "block-shell"
+          },
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "secret_exposure",
+          "severity": null,
+          "source": "model"
+        }
+      ]
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        },
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "secret_exposure",
+          "severity": null,
+          "source": "model"
+        }
+      ],
+      "review": "standard"
+    },
+    "name": "batch",
+    "v1": {
+      "predictions": [
+        {
+          "head_scores": {},
+          "malicious_score": 0.0,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome_scores": {},
+          "prediction": "BENIGN",
+          "primary_outcome": "benign",
+          "score": 0.0,
+          "threshold": 0.5
+        },
+        {
+          "head_scores": {},
+          "malicious_score": 1.0,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome_scores": {
+            "control_abuse": 0.25,
+            "secret_exposure": 0.75
+          },
+          "prediction": "MALICIOUS",
+          "primary_outcome": "secret_exposure",
+          "score": 1.0,
+          "threshold": 0.5
+        }
+      ],
+      "review": "standard"
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "allow",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": null,
+          "severity": null,
+          "source": null
+        },
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "secret_exposure",
+          "severity": null,
+          "source": "model"
+        }
+      ],
+      "review": "standard"
+    }
+  },
+  {
+    "adapted": {
+      "results": []
+    },
+    "name": "empty_batch",
+    "v1": {
+      "predictions": []
+    },
+    "v2": {
+      "results": []
+    }
+  },
+  {
+    "adapted": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": null,
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "control_abuse",
+          "severity": null,
+          "source": "model"
+        }
+      ]
+    },
+    "name": "judge_assessed_block",
+    "v1": {
+      "head_scores": {},
+      "malicious_score": 1.0,
+      "model_id": "silmaril-cascade-1-6",
+      "outcome_scores": {
+        "control_abuse": 0.75
+      },
+      "prediction": "MALICIOUS",
+      "primary_outcome": "control_abuse",
+      "score": 1.0,
+      "threshold": 0.5
+    },
+    "v2": {
+      "results": [
+        {
+          "action": "block",
+          "confidence": "high",
+          "governance": null,
+          "model_id": "silmaril-cascade-1-6",
+          "outcome": "control_abuse",
+          "severity": "moderate",
+          "source": "model"
+        }
+      ]
+    }
+  }
+]

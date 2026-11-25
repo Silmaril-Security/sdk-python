@@ -210,24 +210,19 @@ class SilmarilFirewallHandler(BaseCallbackHandler):
             )
             return
 
-        blocked = result.prediction == "MALICIOUS" or (
-            result.governance is not None and result.governance.action == "block"
-        )
         effective_mode = self.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,
             tool_name=tool_name,
             text=text,
             result=result,
-            blocked=blocked,
+            blocked=result.blocked,
             mode=effective_mode,
             shadow_mode=effective_mode == "shadow",
         )
         self._fire_on_classify(event)
-        if blocked and effective_mode == "block":
+        if result.blocked and effective_mode == "block":
             raise FirewallBlockedException(
-                score=result.score,
-                threshold=result.threshold,
                 prompt_text=text,
                 hook=hook_label,
                 tool_name=tool_name,
@@ -509,24 +504,19 @@ class AsyncSilmarilFirewallHandler(AsyncCallbackHandler):
             )
             return
 
-        blocked = result.prediction == "MALICIOUS" or (
-            result.governance is not None and result.governance.action == "block"
-        )
         effective_mode = self._sync_handler.mode or result.mode or "block"
         event = ClassifyEvent(
             hook=hook_label,
             tool_name=tool_name,
             text=text,
             result=result,
-            blocked=blocked,
+            blocked=result.blocked,
             mode=effective_mode,
             shadow_mode=effective_mode == "shadow",
         )
         await self._fire_on_classify(event)
-        if blocked and effective_mode == "block":
+        if result.blocked and effective_mode == "block":
             raise FirewallBlockedException(
-                score=result.score,
-                threshold=result.threshold,
                 prompt_text=text,
                 hook=hook_label,
                 tool_name=tool_name,
@@ -670,6 +660,7 @@ async def _async_classify_raw(
         review=firewall.review,
         max_retries=firewall.max_retries,
     ) as async_firewall:
+        async_firewall._route = firewall._route
         return await async_firewall._classify_raw(
             text,
             hook=hook,

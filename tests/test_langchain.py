@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from wire import decision, model_block, results
 
 from silmaril_security.sdk import (
     BlockResult,
@@ -37,12 +38,7 @@ def test_langchain_handler_blocks_last_user_message(monkeypatch):
 
     def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
         calls.append((text, hook, tool_name, request_id, metadata))
-        return BlockResult(
-            prediction="MALICIOUS",
-            score=0.9,
-            threshold=0.5,
-            mode="block",
-        )
+        return BlockResult("block", source="model", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
 
@@ -75,7 +71,7 @@ def test_langchain_tool_hooks_have_distinct_request_ids(monkeypatch):
 
     def raw(text, **kwargs):
         calls.append((text, kwargs))
-        return BlockResult(prediction="BENIGN", score=0.1, threshold=0.5, mode="block")
+        return BlockResult("allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     handler = fw.as_langchain_handler()
@@ -109,7 +105,7 @@ def test_langchain_explicit_governance_block(monkeypatch):
     monkeypatch.setattr(
         fw, "_classify_raw",
         lambda text, **kwargs: BlockResult(
-            prediction="BENIGN", score=0.1, threshold=0.5, mode="block",
+            "block", source="governance", mode="block",
             governance=GovernanceDecision(action="block", policy_version="v2"),
         ),
     )
@@ -135,7 +131,7 @@ def test_langchain_handler_fail_open(monkeypatch):
     )
 
 
-def test_langchain_requested_warn_survives_legacy_mode_less_response(monkeypatch):
+def test_langchain_requested_warn_survives_mode_less_response(monkeypatch):
     fw = Firewall(
         api_key="sk",
         api_url="https://api.test.invalid/classify",
@@ -143,15 +139,7 @@ def test_langchain_requested_warn_survives_legacy_mode_less_response(monkeypatch
     )
     handler = fw.as_langchain_handler()
 
-    monkeypatch.setattr(
-        fw,
-        "_post_json",
-        lambda payload: {
-            "prediction": "MALICIOUS",
-            "score": 0.9,
-            "threshold": 0.5,
-        },
-    )
+    monkeypatch.setattr(fw, "_post_json", lambda url, payload: results(model_block()))
 
     handler.on_chat_model_start(
         serialized={},
@@ -166,12 +154,7 @@ def test_langchain_effective_warn_preserves_flow(monkeypatch):
     handler = fw.as_langchain_handler(on_classify=events.append)
 
     def fake_raw(text, *, hook=None, tool_name=None, request_id=None, mode=None, metadata=None):
-        return BlockResult(
-            prediction="MALICIOUS",
-            score=0.9,
-            threshold=0.5,
-            mode="warn",
-        )
+        return BlockResult("block", source="model", mode="warn")
 
     monkeypatch.setattr(fw, "_classify_raw", fake_raw)
 
@@ -222,12 +205,7 @@ async def test_async_langchain_handler_supports_async_callback(monkeypatch):
         mode=None,
         metadata=None,
     ):
-        return BlockResult(
-            prediction="MALICIOUS",
-            score=0.9,
-            threshold=0.5,
-            mode=mode or "block",
-        )
+        return BlockResult("block", source="model", mode=mode or "block")
 
     monkeypatch.setattr("silmaril_security.sdk.langchain._async_classify_raw", fake_async_raw)
 
@@ -250,14 +228,9 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://api.test.invalid/classify")
     payloads = []
 
-    async def fake_post_json(self, payload):
+    async def fake_post_json(self, client, url, payload):
         payloads.append(payload)
-        return {
-            "prediction": "BENIGN",
-            "score": 0.1,
-            "threshold": 0.5,
-            "mode": "block",
-        }
+        return results(decision())
 
     monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._post_json", fake_post_json)
 
@@ -270,7 +243,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
         request_id="async-req",
     )
 
-    assert result.score == 0.1
+    assert result == BlockResult("allow")
     assert len(payloads) == 1
     payload = payloads[0]
     assert payload["text"] == "a" * 4001
@@ -286,7 +259,7 @@ async def test_async_classify_raw_sends_long_event_once(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_async_langchain_requested_warn_survives_legacy_mode_less_response(monkeypatch):
+async def test_async_langchain_requested_warn_survives_mode_less_response(monkeypatch):
     fw = Firewall(
         api_key="sk",
         api_url="https://api.test.invalid/classify",
@@ -294,12 +267,8 @@ async def test_async_langchain_requested_warn_survives_legacy_mode_less_response
     )
     handler = fw.as_async_langchain_handler()
 
-    async def fake_post_json(self, payload):
-        return {
-            "prediction": "MALICIOUS",
-            "score": 0.9,
-            "threshold": 0.5,
-        }
+    async def fake_post_json(self, client, url, payload):
+        return results(model_block())
 
     monkeypatch.setattr("silmaril_security.sdk.async_firewall.AsyncFirewall._post_json", fake_post_json)
 

@@ -58,7 +58,7 @@ def test_model_runs_while_its_input_is_classified(monkeypatch):
 
 
 def test_blocked_input_withholds_the_model_response(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     held.release.set()
     middleware = create_deepagents_middleware(_firewall(monkeypatch, held), parallel=True)
 
@@ -69,7 +69,7 @@ def test_blocked_input_withholds_the_model_response(monkeypatch):
 
 
 def test_blocked_attempt_cap_is_decided_before_the_model_runs(monkeypatch):
-    held = HeldClassification("MALICIOUS", "BENIGN")
+    held = HeldClassification("block", "allow")
     held.release.set()
     middleware = create_deepagents_middleware(
         _firewall(monkeypatch, held), parallel=True, max_blocked_attempts=1
@@ -89,7 +89,7 @@ def test_blocked_attempt_cap_is_decided_before_the_model_runs(monkeypatch):
 
 
 def test_shadow_classifies_in_the_background(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     fw = _firewall(monkeypatch, held, mode="shadow")
     middleware = create_deepagents_middleware(fw)
 
@@ -136,7 +136,7 @@ def test_protected_agent_generates_while_its_input_is_classified(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_async_block_cancels_the_model_call(monkeypatch):
-    held = AsyncHeldClassification("MALICIOUS")
+    held = AsyncHeldClassification("block")
     held.release.set()
     fw = AsyncFirewall(api_key="sk", api_url=URL)
     monkeypatch.setattr(fw, "_classify_raw", held)

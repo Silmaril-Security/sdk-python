@@ -13,15 +13,15 @@ from silmaril_security.sdk import BlockResult
 WAIT_SECONDS = 10
 
 
-def verdict(prediction: str = "BENIGN", mode: str | None = "block") -> BlockResult:
-    return BlockResult(prediction, 0.9 if prediction == "MALICIOUS" else 0.1, 0.5, mode=mode)
+def verdict(action: str = "allow", mode: str | None = "block") -> BlockResult:
+    return BlockResult(action, mode=mode)
 
 
 class HeldClassification:
     """Replace ``Firewall._classify_raw``; each call waits until ``release`` is set."""
 
-    def __init__(self, *predictions: str) -> None:
-        self.predictions = list(predictions) or ["BENIGN"]
+    def __init__(self, *actions: str) -> None:
+        self.actions = list(actions) or ["allow"]
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.started = threading.Event()
         self.release = threading.Event()
@@ -30,7 +30,7 @@ class HeldClassification:
         self.calls.append((text, options))
         self.started.set()
         assert self.release.wait(WAIT_SECONDS), "held classification was never released"
-        return verdict(self.predictions[min(len(self.calls), len(self.predictions)) - 1], options.get("mode"))
+        return verdict(self.actions[min(len(self.calls), len(self.actions)) - 1], options.get("mode"))
 
     @property
     def hooks(self) -> list[Any]:
@@ -40,8 +40,8 @@ class HeldClassification:
 class AsyncHeldClassification:
     """Replace ``AsyncFirewall._classify_raw``; each call waits until ``release`` is set."""
 
-    def __init__(self, *predictions: str) -> None:
-        self.predictions = list(predictions) or ["BENIGN"]
+    def __init__(self, *actions: str) -> None:
+        self.actions = list(actions) or ["allow"]
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -50,7 +50,7 @@ class AsyncHeldClassification:
         self.calls.append((text, options))
         self.started.set()
         await asyncio.wait_for(self.release.wait(), WAIT_SECONDS)
-        return verdict(self.predictions[min(len(self.calls), len(self.predictions)) - 1], options.get("mode"))
+        return verdict(self.actions[min(len(self.calls), len(self.actions)) - 1], options.get("mode"))
 
     @property
     def hooks(self) -> list[Any]:

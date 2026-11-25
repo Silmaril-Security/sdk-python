@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.0.0
+
+The SDK now calls `POST /v2/classify` and returns the Firewall decision instead
+of scores. No configuration changes are needed: keep the same `api_key` and
+`api_url`.
+
+- Derive the endpoint from the configured `api_url`: remove a trailing slash
+  and a final `/v2/classify` or `/classify` path, keep the query string, and
+  call `/v2/classify` on that base.
+- Work against runtimes without `/v2/classify`. On HTTP 403, 404, or 405 the
+  SDK sends the same request to `/classify`, uses that response as the result,
+  and adapts a successful one to the same `BlockResult`. Evidence that version
+  1 does not carry is null: `confidence` and `severity` are `None`. A client
+  remembers a successful fallback and calls `/classify` directly afterwards.
+  A successful response without a `results` key is adapted as a version 1
+  response whichever path returned it, so a deployment that routes
+  `/v2/classify` to the version 1 handler keeps blocking.
+- `BlockResult` carries `action`, `source`, `confidence`, `severity`,
+  `outcome`, `governance`, `model_id`, `review`, and `mode`, and adds a
+  `blocked` property. `model_id` is provenance: the identifier of the model
+  release that classified the item. `action` is the only field the SDK enforces on and is always
+  `"allow"` or `"block"`: any response value other than `"allow"` is reported
+  as `"block"`. `source`, `confidence`, `severity`, and `outcome` are returned
+  as sent, including values this version does not know.
+- Remove `prediction`, `score`, `threshold`, `primary_outcome`,
+  `outcome_scores`, `detector_scores`, and `detector_counts` from
+  `BlockResult`, and `score` and `threshold` from `FirewallBlockedException`,
+  whose `result` is now required. Blocking exception messages report the
+  decision evidence.
+- Remove the `Prediction` type and the `normalize_primary_outcome`,
+  `normalize_harmful_outcome`, `normalize_harmful_outcome_float_map`, and
+  `normalize_harmful_outcome_int_map` helpers, which only served the removed
+  fields. Add the `DecisionAction`, `DecisionSource`, `DecisionConfidence`,
+  and `DecisionSeverity` types.
+- Remove `OUTCOME_BENIGN`, `PRIMARY_OUTCOMES`, `PrimaryOutcome`,
+  `PrimaryOutcomeValue`, and `is_primary_outcome`. `outcome` is `None` on an
+  allow, so a benign outcome never appears on a result. The harmful-outcome
+  constants, `HARMFUL_OUTCOMES`, `OUTCOME_DESCRIPTIONS`, and
+  `is_harmful_outcome` stay.
+- Reject a response without a `results` list that matches the inputs, or with
+  a result that has no string `action`. Governance validation, the `review`
+  acknowledgement requirement, the request body, and the retry policy are
+  unchanged.
+- SDK 0.x keeps working against `/classify`, which is frozen.
+
+Migration:
+
+| 0.x | 1.0 |
+| --- | --- |
+| `prediction` | `action` (`"MALICIOUS"` becomes `"block"`, `"BENIGN"` becomes `"allow"`) |
+| `primary_outcome` | `outcome` |
+| `score` / `threshold` | `confidence` / `severity` |
+| `predictions` | `results` |
+
+`confidence` and `severity` are ordered labels rather than numbers. They
+describe the Firewall's assessment of the item and are set only when that
+assessment is the reason for the block: they are `None` on an allow, on a
+block that came from a governance policy, and on a block the Firewall reached
+without that assessment.
+
 ## 0.11.1
 
 - Honor `Retry-After` on retryable HTTP error responses in the synchronous

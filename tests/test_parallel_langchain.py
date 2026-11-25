@@ -43,7 +43,7 @@ def test_model_output_is_classified_by_default(monkeypatch):
 
 
 def test_parallel_input_check_is_joined_when_the_model_ends(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     handler = _firewall(monkeypatch, held).as_langchain_handler(parallel=True)
     run_id = uuid4()
 
@@ -60,7 +60,7 @@ def test_parallel_input_check_is_joined_when_the_model_ends(monkeypatch):
 
 
 def test_parallel_block_surfaces_at_the_next_hook_once_it_has_landed(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     held.release.set()
     fw = _firewall(monkeypatch, held)
     handler = fw.as_langchain_handler(parallel=True)
@@ -74,7 +74,7 @@ def test_parallel_block_surfaces_at_the_next_hook_once_it_has_landed(monkeypatch
 
 
 def test_parallel_tool_result_is_joined_before_the_next_tool_runs(monkeypatch):
-    held = HeldClassification("BENIGN", "MALICIOUS")
+    held = HeldClassification("allow", "block")
     held.release.set()
     handler = _firewall(monkeypatch, held).as_langchain_handler(parallel=True)
     graph, first_tool, second_tool = uuid4(), uuid4(), uuid4()
@@ -91,7 +91,7 @@ def test_parallel_tool_result_is_joined_before_the_next_tool_runs(monkeypatch):
 
 
 def test_parallel_tool_call_still_waits_for_its_verdict(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     held.release.set()
     handler = _firewall(monkeypatch, held).as_langchain_handler(parallel=True)
 
@@ -102,7 +102,7 @@ def test_parallel_tool_call_still_waits_for_its_verdict(monkeypatch):
 
 
 def test_parallel_tool_result_is_joined_at_the_next_model_end(monkeypatch):
-    held = HeldClassification("BENIGN", "MALICIOUS")
+    held = HeldClassification("allow", "block")
     held.release.set()
     fw = _firewall(monkeypatch, held)
     handler = fw.as_langchain_handler(parallel=True)
@@ -124,7 +124,7 @@ def test_parallel_tool_result_is_joined_at_the_next_model_end(monkeypatch):
 
 
 def test_parallel_block_stays_visible_to_sibling_callbacks_until_the_run_ends(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     fw = _firewall(monkeypatch, held)
     handler = fw.as_langchain_handler(parallel=True)
     graph, model, tool = uuid4(), uuid4(), uuid4()
@@ -154,7 +154,7 @@ def test_parallel_block_stays_visible_to_sibling_callbacks_until_the_run_ends(mo
 
 
 def test_failed_run_leaves_no_deferred_verdicts(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     held.release.set()
     fw = _firewall(monkeypatch, held)
     handler = fw.as_langchain_handler(parallel=True)
@@ -168,7 +168,7 @@ def test_failed_run_leaves_no_deferred_verdicts(monkeypatch):
 
 
 def test_shadow_classifies_in_the_background_unless_failures_must_surface(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     fw = _firewall(monkeypatch, held, mode="shadow")
     run_id = uuid4()
 
@@ -203,7 +203,7 @@ def test_protected_model_generates_while_its_input_is_classified(monkeypatch):
 
 
 def test_protected_model_withholds_output_for_a_blocked_input(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     held.release.set()
     fw = _firewall(monkeypatch, held)
     protected = protect_langchain_runnable(
@@ -216,7 +216,7 @@ def test_protected_model_withholds_output_for_a_blocked_input(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_async_parallel_input_check_is_joined_when_the_model_ends(monkeypatch):
-    held = AsyncHeldClassification("MALICIOUS")
+    held = AsyncHeldClassification("block")
     fw = AsyncFirewall(api_key="sk", api_url=URL)
     monkeypatch.setattr(fw, "_classify_raw", held)
     handler = fw.as_async_langchain_handler(parallel=True)
@@ -257,7 +257,7 @@ async def test_async_protected_model_generates_while_its_input_is_classified(mon
 
 @pytest.mark.asyncio
 async def test_async_handler_flush_waits_for_background_checks_of_a_sync_client(monkeypatch):
-    held = AsyncHeldClassification("MALICIOUS")
+    held = AsyncHeldClassification("block")
     events = []
     fw = Firewall(api_key="sk", api_url=URL, mode="shadow")
 
@@ -277,7 +277,7 @@ async def test_async_handler_flush_waits_for_background_checks_of_a_sync_client(
 
 @pytest.mark.asyncio
 async def test_async_sibling_callbacks_join_the_same_deferred_block(monkeypatch):
-    held = AsyncHeldClassification("MALICIOUS")
+    held = AsyncHeldClassification("block")
     fw = AsyncFirewall(api_key="sk", api_url=URL)
     monkeypatch.setattr(fw, "_classify_raw", held)
     handler = fw.as_async_langchain_handler(parallel=True)
@@ -306,7 +306,7 @@ async def test_async_sibling_callbacks_join_the_same_deferred_block(monkeypatch)
 
 
 def test_many_sibling_threads_join_the_same_deferred_block(monkeypatch):
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     fw = _firewall(monkeypatch, held)
     handler = fw.as_langchain_handler(parallel=True)
     graph, model = uuid4(), uuid4()
@@ -340,7 +340,7 @@ def test_many_sibling_threads_join_the_same_deferred_block(monkeypatch):
 
 def test_busy_handler_keeps_unfinished_and_blocked_verdicts(monkeypatch):
     monkeypatch.setattr("silmaril_security.sdk._pending.MAX_DEFERRED_SCOPES", 2)
-    held = HeldClassification("MALICIOUS")
+    held = HeldClassification("block")
     fw = _firewall(monkeypatch, held)
     handler = fw.as_langchain_handler(parallel=True)
     runs = [uuid4() for _ in range(6)]

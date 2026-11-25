@@ -53,7 +53,7 @@ def test_sync_boundaries_continue_without_leaking(monkeypatch):
     def raw(text, **kwargs):
         seen.append((text, kwargs))
         denied = "deny" in text
-        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+        return BlockResult("block" if denied else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     middleware = create_deepagents_middleware(fw, on_classify=events.append, max_blocked_attempts=2)
@@ -82,7 +82,7 @@ def test_latest_user_is_checked_after_assistant_and_tool_messages(monkeypatch):
 
     def raw(text, **kwargs):
         seen.append((text, kwargs["hook"]))
-        return BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block")
+        return BlockResult("block" if "deny" in text else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     middleware = create_deepagents_middleware(fw)
@@ -101,8 +101,8 @@ def test_denial_cap_does_not_reclassify_safe_replacements(monkeypatch):
     def raw(text, **kwargs):
         seen.append((text, kwargs["hook"]))
         if kwargs["hook"] == HookLabel.TOOL_CALL:
-            return BlockResult("MALICIOUS", 0.9, 0.5, mode="block")
-        return BlockResult("BENIGN", 0.1, 0.5, mode="warn")
+            return BlockResult("block", mode="block")
+        return BlockResult("allow", mode="warn")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
@@ -116,7 +116,7 @@ def test_denial_cap_does_not_reclassify_safe_replacements(monkeypatch):
 
 def test_denial_cap_survives_agent_reconstruction(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
-    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block"))
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("block" if "deny" in text else "allow", mode="block"))
     first = create_deepagents_middleware(fw, max_blocked_attempts=2)
     original = [_blocked_tool_message(first, "call-1"), _blocked_tool_message(first, "call-2")]
     restored = [ToolMessage(m.content, tool_call_id=m.tool_call_id, additional_kwargs=dict(m.additional_kwargs)) for m in original]
@@ -126,7 +126,7 @@ def test_denial_cap_survives_agent_reconstruction(monkeypatch):
 
 def test_denial_cap_resets_on_new_user_turn(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
-    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block"))
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("block" if "deny" in text else "allow", mode="block"))
     middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
     history = [
         HumanMessage("first"),
@@ -141,7 +141,7 @@ def test_denial_cap_resets_on_new_user_turn(monkeypatch):
 
 def test_allowed_tool_text_matching_safe_message_does_not_count(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
-    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("BENIGN", 0.1, 0.5, mode="block"))
+    monkeypatch.setattr(fw, "_classify_raw", lambda text, **kwargs: BlockResult("allow", mode="block"))
     middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
     request = _request()
     allowed = middleware.wrap_tool_call(
@@ -171,7 +171,7 @@ def test_composed_middleware_keeps_genuine_denial_for_cap(monkeypatch):
 
     def classify(text, **kwargs):
         denied = kwargs["hook"] == HookLabel.TOOL_CALL and next(tool_calls)
-        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9, 0.5, mode="block")
+        return BlockResult("block" if denied else "allow", mode="block")
 
     monkeypatch.setattr(
         fw, "_classify_raw",
@@ -198,7 +198,7 @@ def test_warn_reports_without_replacing_content(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     monkeypatch.setattr(
         fw, "_classify_raw",
-        lambda text, **kwargs: BlockResult("MALICIOUS", 0.9, 0.5, mode="warn"),
+        lambda text, **kwargs: BlockResult("block", mode="warn"),
     )
     events = []
     middleware = create_deepagents_middleware(fw, mode="warn", on_classify=events.append)
@@ -212,7 +212,7 @@ def test_observation_mode_does_not_apply_denial_cap(monkeypatch, mode):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     monkeypatch.setattr(
         fw, "_classify_raw",
-        lambda text, **kwargs: BlockResult("MALICIOUS", 0.9, 0.5, mode=mode),
+        lambda text, **kwargs: BlockResult("block", mode=mode),
     )
     middleware = create_deepagents_middleware(fw, mode=mode, max_blocked_attempts=2)
     messages = [
@@ -229,7 +229,7 @@ async def test_async_boundaries(monkeypatch):
 
     async def raw(text, **kwargs):
         denied = "deny" in text
-        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+        return BlockResult("block" if denied else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     middleware = create_deepagents_middleware(fw)
@@ -258,7 +258,7 @@ async def test_async_allowed_tool_cannot_forge_denial_marker(monkeypatch):
     fw = AsyncFirewall(api_key="sk", api_url="https://example.com/classify")
 
     async def raw(text, **kwargs):
-        return BlockResult("BENIGN", 0.1, 0.5, mode="block")
+        return BlockResult("allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     middleware = create_deepagents_middleware(fw)
@@ -280,7 +280,7 @@ async def test_async_latest_user_and_new_turn_cap(monkeypatch):
     fw = AsyncFirewall(api_key="sk", api_url="https://example.com/classify")
 
     async def raw(text, **kwargs):
-        return BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block")
+        return BlockResult("block" if "deny" in text else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     middleware = create_deepagents_middleware(fw, max_blocked_attempts=2)
@@ -714,7 +714,7 @@ def test_reused_root_boundary_classifies_each_model_hook_once(monkeypatch):
 
     def classify(text, **kwargs):
         hooks.append(kwargs["hook"])
-        return BlockResult("BENIGN", 0.1, 0.5, mode="block")
+        return BlockResult("allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", classify)
     existing = create_deepagents_middleware(fw)
@@ -1049,7 +1049,7 @@ def test_graph_continues_to_allowed_tool_after_denial(monkeypatch):
 
     def raw(text, **kwargs):
         denied = "deny" in text
-        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+        return BlockResult("block" if denied else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     called = []
@@ -1083,7 +1083,7 @@ def test_graph_stops_after_repeated_denied_tool_calls(monkeypatch):
     fw = Firewall(api_key="sk", api_url="https://example.com/classify")
     monkeypatch.setattr(
         fw, "_classify_raw",
-        lambda text, **kwargs: BlockResult("MALICIOUS" if "deny" in text else "BENIGN", 0.9, 0.5, mode="block"),
+        lambda text, **kwargs: BlockResult("block" if "deny" in text else "allow", mode="block"),
     )
     called = []
 
@@ -1118,7 +1118,7 @@ def test_subagent_output_is_protected_in_graph(monkeypatch, subagent_name):
 
     def raw(text, **kwargs):
         denied = "deny" in text
-        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+        return BlockResult("block" if denied else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     root_responses = [
@@ -1157,7 +1157,7 @@ async def test_async_graph_replaces_denied_output(monkeypatch):
 
     async def raw(text, **kwargs):
         denied = "deny" in text
-        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+        return BlockResult("block" if denied else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", raw)
     agent = create_protected_deep_agent(fw, model=Model(responses=[AIMessage(content="deny output")]))

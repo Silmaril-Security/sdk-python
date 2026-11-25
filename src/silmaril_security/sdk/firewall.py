@@ -11,11 +11,19 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from email.utils import parsedate_to_datetime
 from functools import cached_property, partial
+from itertools import repeat
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 import requests
 
+from silmaril_security.sdk._classify_contract import (
+    FALLBACK_STATUS_CODES,
+    ClassifyRoute,
+    adapt_v1_response,
+    is_v2_response,
+    v1_items,
+)
 from silmaril_security.sdk._pending import (
     DEFAULT_MAX_CONCURRENT,
     DEFAULT_MAX_QUEUED,
@@ -33,11 +41,6 @@ from silmaril_security.sdk.exceptions import (
     SilmarilApiError,
 )
 from silmaril_security.sdk.hooks import HookLabel, hook_value, normalize_hook_label
-from silmaril_security.sdk.outcomes import (
-    normalize_harmful_outcome_float_map,
-    normalize_harmful_outcome_int_map,
-    normalize_primary_outcome,
-)
 from silmaril_security.sdk.sanitization import sanitize_text
 from silmaril_security.sdk.types import (
     BlockedBatchItem,
@@ -132,53 +135,51 @@ def _require_review_acknowledgement(
     return requested
 
 
-def _verdict_number(data: Mapping[str, Any], field: str) -> float:
-    value = data.get(field)
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not 0 <= value <= 1
-    ):
-        raise ValueError(f"Firewall: response {field} must be a finite number between 0 and 1")
-    return float(value)
-
-
 def _block_result_from_json(
-    data: dict[str, Any],
-    requested_mode: FirewallMode | None = None,
-    review: ReviewLevel | None = None,
+    item: Any,
+    *,
+    mode: FirewallMode | None,
+    review: ReviewLevel | None,
 ) -> BlockResult:
-    score = _verdict_number(data, "score")
-    threshold = _verdict_number(data, "threshold")
-    prediction = data.get("prediction")
-    if prediction is None:
-        raise ValueError(
-            "Firewall: backend response missing required 'prediction' field"
-        )
-    if prediction not in ("BENIGN", "MALICIOUS"):
-        raise ValueError(f"Firewall: invalid prediction {prediction!r}")
-    primary_raw = data.get("primary_outcome")
-    governance = _governance_decision_from_json(data.get("governance"))
+    if not isinstance(item, Mapping) or not isinstance(item.get("action"), str):
+        raise ValueError("Firewall: backend result missing required 'action' string")
     return BlockResult(
-        prediction=prediction,
-        score=score,
-        threshold=threshold,
-        mode=_normalize_mode(data.get("mode"), requested_mode),
-        governance=governance,
-        primary_outcome=(
-            normalize_primary_outcome(primary_raw) if primary_raw is not None else None
-        ),
-        outcome_scores=normalize_harmful_outcome_float_map(
-            data.get("outcome_scores"), "outcome_scores"
-        ),
-        detector_scores=normalize_harmful_outcome_float_map(
-            data.get("detector_scores"), "detector_scores"
-        ),
-        detector_counts=normalize_harmful_outcome_int_map(
-            data.get("detector_counts"), "detector_counts"
-        ),
+        action="allow" if item["action"] == "allow" else "block",
+        source=item.get("source"),
+        confidence=item.get("confidence"),
+        severity=item.get("severity"),
+        outcome=item.get("outcome"),
+        governance=_governance_decision_from_json(item.get("governance")),
+        model_id=item.get("model_id"),
         review=review,
+        mode=mode,
     )
+
+
+def _block_results(
+    body: Any,
+    *,
+    expected_length: int,
+    mode: FirewallMode | None,
+    review: ReviewLevel | None,
+) -> list[BlockResult]:
+    _require_review_acknowledgement(body, review)
+    if is_v2_response(body):
+        results, response_modes = body["results"], repeat(None)
+    else:
+        response_modes = [item.get("mode") for item in v1_items(body)]
+        results = adapt_v1_response(body)["results"]
+    if not isinstance(results, list):
+        raise ValueError("Firewall: backend response 'results' must be a list")
+    if len(results) != expected_length:
+        raise ValueError(
+            f"Firewall: results length {len(results)} does not match texts length "
+            f"{expected_length}"
+        )
+    return [
+        _block_result_from_json(item, mode=_normalize_mode(response_mode, mode), review=review)
+        for item, response_mode in zip(results, response_modes)
+    ]
 
 
 def _governance_decision_from_json(value: Any) -> GovernanceDecision | None:
@@ -439,22 +440,6 @@ def _batch_payload(
     return text_list, payload
 
 
-def _batch_results(
-    data: dict[str, Any],
-    *,
-    expected_length: int,
-    mode: FirewallMode | None,
-    review: ReviewLevel | None = None,
-) -> list[BlockResult]:
-    predictions = data["predictions"]
-    if len(predictions) != expected_length:
-        raise ValueError(
-            "Firewall: predictions length "
-            f"{len(predictions)} does not match texts length {expected_length}"
-        )
-    return [_block_result_from_json(item, mode, review=review) for item in predictions]
-
-
 def _new_classify_event(
     *,
     text: str,
@@ -468,16 +453,14 @@ def _new_classify_event(
         tool_name=tool_name,
         text=text,
         result=result,
-        blocked=result.prediction == "MALICIOUS" or (
-            result.governance is not None and result.governance.action == "block"
-        ),
+        blocked=result.blocked,
         mode=effective_mode,
         shadow_mode=effective_mode == "shadow",
     )
 
 
 class Firewall:
-    """Client for the Silmaril Firewall /classify endpoint."""
+    """Client for the Silmaril Firewall classify API."""
 
     def __init__(
         self,
@@ -514,6 +497,7 @@ class Firewall:
         self.on_classify = on_classify
         self.max_retries = max_retries
         self._session = session or requests.Session()
+        self._route = ClassifyRoute.from_api_url(api_url)
 
     def classify(
         self,
@@ -528,7 +512,7 @@ class Firewall:
         review: ReviewLevel | None = None,
         request_id: str | None = None,
     ) -> BlockResult:
-        """Classify a single text and enforce the backend tenant threshold."""
+        """Classify a single text and enforce the backend decision."""
         request_id_value = request_id or str(uuid4())
         requested_mode = self._effective_mode(mode, shadow_mode)
         requested_review = self._effective_review(review)
@@ -551,8 +535,6 @@ class Firewall:
         self._fire_on_classify(event)
         if event.blocked and event.mode == "block":
             raise FirewallBlockedException(
-                score=result.score,
-                threshold=result.threshold,
                 prompt_text=text,
                 hook=event.hook,
                 tool_name=tool_name,
@@ -573,7 +555,7 @@ class Firewall:
         review: ReviewLevel | None = None,
         request_id: str | None = None,
     ) -> list[BlockResult]:
-        """Classify multiple independent texts and enforce backend tenant thresholds."""
+        """Classify multiple independent texts and enforce the backend decisions."""
         request_id_value = request_id or str(uuid4())
         requested_mode = self._effective_mode(mode, shadow_mode)
         requested_review = self._effective_review(review)
@@ -704,31 +686,7 @@ class Firewall:
             mode=mode,
             review=requested_review,
         )
-        data = self._post_json(payload)
-        _require_review_acknowledgement(data, requested_review)
-        return _block_result_from_json(data, mode, review=requested_review)
-
-    def _classify_single_raw(
-        self,
-        text: str,
-        *,
-        hook: HookLabel | str | None = None,
-        tool_name: str | None = None,
-        metadata: ClassificationMetadata | None = None,
-        mode: FirewallMode | None = None,
-    ) -> BlockResult:
-        payload: dict[str, Any] = {"text": text}
-        if mode is not None:
-            payload["mode"] = mode
-        hook_str = hook_value(hook)
-        if hook_str:
-            payload["hook"] = hook_str
-        if tool_name:
-            payload["tool_name"] = tool_name
-        if metadata is not None:
-            payload["metadata"] = dict(metadata)
-        data = self._post_json(payload)
-        return _block_result_from_json(data, mode)
+        return self._decide(payload, expected_length=1, mode=mode, review=requested_review)[0]
 
     def _classify_batch_raw(
         self,
@@ -753,22 +711,36 @@ class Firewall:
             mode=mode,
             review=requested_review,
         )
-        data = self._post_json(payload)
-        _require_review_acknowledgement(data, requested_review)
-        return _batch_results(
-            data,
-            expected_length=len(text_list),
-            mode=mode,
-            review=requested_review,
+        return self._decide(
+            payload, expected_length=len(text_list), mode=mode, review=requested_review
         )
 
-    def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _decide(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_length: int,
+        mode: FirewallMode | None,
+        review: ReviewLevel | None,
+    ) -> list[BlockResult]:
+        decode = partial(_block_results, expected_length=expected_length, mode=mode, review=review)
+        if not self._route.legacy:
+            try:
+                return decode(self._post_json(self._route.v2_url, payload))
+            except SilmarilApiError as error:
+                if error.status not in FALLBACK_STATUS_CODES:
+                    raise
+        results = decode(self._post_json(self._route.v1_url, payload))
+        self._route.legacy = True
+        return results
+
+    def _post_json(self, url: str, payload: dict[str, Any]) -> Any:
         body = json.dumps(payload)
         max_retries = _retry_budget(self.max_retries)
         for attempt in range(max_retries + 1):
             try:
                 response = self._session.post(
-                    self.api_url,
+                    url,
                     data=body,
                     headers={
                         "x-api-key": self.api_key,

@@ -10,10 +10,12 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from wire import TEST_API_URL, V2_URL, decision, governance_block, model_block, results
 
 from silmaril_security.sdk import (
     AsyncFirewall,
     BatchFirewallBlockedException,
+    BlockResult,
     ClassifyEvent,
     FirewallBlockedException,
     GovernanceResource,
@@ -22,27 +24,15 @@ from silmaril_security.sdk import (
 )
 from silmaril_security.sdk.firewall import _MAX_ERROR_BODY_BYTES
 
-TEST_API_URL = "https://api.test.invalid/classify"
-
 
 def response(
     request: httpx.Request,
     *,
-    prediction: str = "BENIGN",
-    score: float = 0.1,
-    mode: str = "block",
+    action: str = "allow",
     status: int = 200,
+    **evidence: Any,
 ) -> httpx.Response:
-    return httpx.Response(
-        status,
-        request=request,
-        json={
-            "prediction": prediction,
-            "score": score,
-            "threshold": 0.5,
-            "mode": mode,
-        },
-    )
+    return httpx.Response(status, request=request, json=results(decision(action, **evidence)))
 
 
 def test_constructor_reports_async_extra_when_httpx_is_unavailable(monkeypatch):
@@ -89,8 +79,7 @@ async def test_concurrent_classify_calls_overlap_and_keep_state_independent():
             both_started.set()
         await release.wait()
         active -= 1
-        score = 0.1 if payload["text"] == "first" else 0.2
-        return response(request, score=score, mode=payload["mode"])
+        return response(request, outcome=payload["text"])
 
     metadata_a = {"application": {"request": "a"}}
     metadata_b = {"application": {"request": "b"}}
@@ -122,8 +111,8 @@ async def test_concurrent_classify_calls_overlap_and_keep_state_independent():
         assert client.is_closed is False
 
     assert max_active == 2
-    assert (first_result.score, first_result.mode) == (0.1, "warn")
-    assert (second_result.score, second_result.mode) == (0.2, "shadow")
+    assert (first_result.outcome, first_result.mode) == ("first", "warn")
+    assert (second_result.outcome, second_result.mode) == ("second", "shadow")
     by_text = {item["text"]: item for item in requests}
     assert by_text["first"]["metadata"]["silmaril"]["request_id"] == "req-a"
     assert by_text["second"]["metadata"]["silmaril"]["request_id"] == "req-b"
@@ -140,24 +129,7 @@ async def test_batch_is_one_ordered_request_and_preserves_block_details():
     async def handle(request: httpx.Request) -> httpx.Response:
         payloads.append(json.loads(request.content))
         return httpx.Response(
-            200,
-            request=request,
-            json={
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.9,
-                        "threshold": 0.5,
-                        "mode": "block",
-                    },
-                    {
-                        "prediction": "BENIGN",
-                        "score": 0.1,
-                        "threshold": 0.5,
-                        "mode": "block",
-                    },
-                ]
-            },
+            200, request=request, json=results(model_block(), decision())
         )
 
     caller_metadata = [{"trace": "one"}, {"trace": "two"}]
@@ -180,7 +152,7 @@ async def test_batch_is_one_ordered_request_and_preserves_block_details():
         "batch-id",
     ]
     assert caller_metadata == [{"trace": "one"}, {"trace": "two"}]
-    assert [result.prediction for result in exc_info.value.results] == ["MALICIOUS", "BENIGN"]
+    assert [result.action for result in exc_info.value.results] == ["block", "allow"]
     assert len(exc_info.value.blocked) == 1
     blocked = exc_info.value.blocked[0]
     assert (blocked.index, blocked.text, blocked.hook, blocked.tool_name) == (
@@ -197,52 +169,44 @@ async def test_async_batch_preserves_full_governance_response_evidence():
         return httpx.Response(
             200,
             request=request,
-            json={
-                "predictions": [
+            json=results(
+                governance_block(
                     {
-                        "prediction": "BENIGN",
-                        "score": 0.0,
-                        "threshold": 0.5,
-                        "governance": {
-                            "action": "block",
-                            "policy_version": "schema6",
-                            "rule_id": "deny-github",
-                            "resource": {
-                                "kind": "mcp_tool",
-                                "id": "create_issue",
-                                "parent_id": "github",
-                            },
-                            "identity_revision": "catalog-9",
-                            "reason": "identity_unresolved",
+                        "action": "block",
+                        "policy_version": "schema6",
+                        "rule_id": "deny-github",
+                        "resource": {
+                            "kind": "mcp_tool",
+                            "id": "create_issue",
+                            "parent_id": "github",
                         },
-                    },
-                    {
-                        "prediction": "BENIGN",
-                        "score": 0.0,
-                        "threshold": 0.5,
-                    },
-                ]
-            },
+                        "identity_revision": "catalog-9",
+                        "reason": "identity_unresolved",
+                    }
+                ),
+                decision(),
+            ),
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
-        results = await fw.classify_batch(["governed", "legacy"], mode="warn")
+        decisions = await fw.classify_batch(["governed", "ungoverned"], mode="warn")
         await fw.aclose()
 
-    decision = results[0].governance
-    assert decision is not None
-    assert decision.action == "block"
-    assert decision.policy_version == "schema6"
-    assert decision.rule_id == "deny-github"
-    assert decision.resource == GovernanceResource(
+    assert decisions[0].source == "governance"
+    governance = decisions[0].governance
+    assert governance is not None
+    assert governance.action == "block"
+    assert governance.policy_version == "schema6"
+    assert governance.rule_id == "deny-github"
+    assert governance.resource == GovernanceResource(
         kind="mcp_tool",
         id="create_issue",
         parent_id="github",
     )
-    assert decision.identity_revision == "catalog-9"
-    assert decision.reason == "identity_unresolved"
-    assert results[1].governance is None
+    assert governance.identity_revision == "catalog-9"
+    assert governance.reason == "identity_unresolved"
+    assert decisions[1].governance is None
 
 
 @pytest.mark.asyncio
@@ -271,7 +235,7 @@ async def test_cancellation_stops_request_and_retry_sleep_while_siblings_succeed
         )
         in_flight = asyncio.create_task(fw.classify("in-flight"))
         await request_started.wait()
-        assert (await fw.classify("sibling")).prediction == "BENIGN"
+        assert (await fw.classify("sibling")).action == "allow"
         in_flight.cancel()
         with pytest.raises(asyncio.CancelledError):
             await in_flight
@@ -286,7 +250,7 @@ async def test_cancellation_stops_request_and_retry_sleep_while_siblings_succeed
         monkeypatch.setattr(fw, "_sleep_before_retry", wait_forever)
         retrying = asyncio.create_task(fw.classify("retry"))
         await sleep_started.wait()
-        assert (await fw.classify("another sibling")).prediction == "BENIGN"
+        assert (await fw.classify("another sibling")).action == "allow"
         retrying.cancel()
         with pytest.raises(asyncio.CancelledError):
             await retrying
@@ -356,7 +320,7 @@ async def test_direct_async_callback_runs_before_block_and_failures_do_not_repla
     events: list[ClassifyEvent] = []
 
     async def handle(request: httpx.Request) -> httpx.Response:
-        return response(request, prediction="MALICIOUS", score=0.9)
+        return response(request, action="block")
 
     async def callback(event: ClassifyEvent) -> None:
         events.append(event)
@@ -376,138 +340,94 @@ async def test_direct_async_callback_runs_before_block_and_failures_do_not_repla
     assert events[0].blocked is True
 
 
+UNFAMILIAR_EVIDENCE = {
+    "source": "policy_pack",
+    "confidence": "certain",
+    "severity": "catastrophic",
+    "outcome": "future_policy_violation",
+}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["warn", "shadow"])
-async def test_async_preserves_future_outcome_fields_for_nonblocking_modes(mode):
-    future = "future_policy_violation"
-
+async def test_async_surfaces_unfamiliar_evidence_for_nonblocking_modes(mode):
     def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            request=request,
-            json={
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "primary_outcome": future,
-                "outcome_scores": {future: 0.8},
-                "detector_scores": {future: 1.0},
-                "detector_counts": {future: 2},
-            },
-        )
+        return response(request, action="block", **UNFAMILIAR_EVIDENCE)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
         result = await fw.classify("future attack", mode=mode)
 
-    assert result.primary_outcome == future
-    assert result.outcome_scores == {future: 0.8}
-    assert result.detector_scores == {future: 1.0}
-    assert result.detector_counts == {future: 2}
+    assert result == BlockResult(action="block", mode=mode, **UNFAMILIAR_EVIDENCE)
 
 
 @pytest.mark.asyncio
-async def test_async_future_outcome_explicit_block_raises_with_result():
-    future = "future_policy_violation"
-
+@pytest.mark.parametrize("action", ["block", "quarantine", "ALLOW", ""])
+async def test_async_blocks_on_any_action_other_than_allow(action):
     def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            request=request,
-            json={
-                "prediction": "MALICIOUS",
-                "score": 0.91,
-                "threshold": 0.5,
-                "primary_outcome": future,
-            },
-        )
+        return response(request, action=action)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
         with pytest.raises(FirewallBlockedException) as exc_info:
-            await fw.classify("future attack", mode="block")
+            await fw.classify("payload")
+        warned = await fw.classify("payload", mode="warn")
 
-    assert exc_info.value.result.primary_outcome == future
+    assert exc_info.value.result == BlockResult(action="block")
+    assert (warned.action, warned.blocked) == ("block", True)
 
 
 @pytest.mark.asyncio
-async def test_async_batch_preserves_and_enforces_future_outcomes():
-    future = "future_policy_violation"
+async def test_async_batch_surfaces_and_enforces_unfamiliar_evidence():
+    def handle(request: httpx.Request) -> httpx.Response:
+        return response(request, action="block", **UNFAMILIAR_EVIDENCE)
 
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
+        decisions = await fw.classify_batch(["future attack"], mode="shadow")
+        with pytest.raises(BatchFirewallBlockedException) as exc_info:
+            await fw.classify_batch(["future attack"], mode="block")
+
+    assert decisions == [BlockResult(action="block", mode="shadow", **UNFAMILIAR_EVIDENCE)]
+    assert exc_info.value.blocked[0].result.outcome == "future_policy_violation"
+
+
+@pytest.mark.asyncio
+async def test_async_version_2_response_ignores_unknown_fields():
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             request=request,
-            json={
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.91,
-                        "threshold": 0.5,
-                        "primary_outcome": future,
-                        "outcome_scores": {future: 0.8},
-                        "detector_scores": {future: 1.0},
-                        "detector_counts": {future: 2},
-                    }
-                ]
-            },
+            json=results(
+                decision(mode="enforce", score=0.99, prediction="MALICIOUS"),
+                mode="shadow",
+                model_id="silmaril-cascade-1-6",
+            ),
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
-        results = await fw.classify_batch(["future attack"], mode="shadow")
-        with pytest.raises(BatchFirewallBlockedException) as exc_info:
-            await fw.classify_batch(["future attack"], mode="block")
+        result = await fw.classify("payload")
 
-    assert results[0].primary_outcome == future
-    assert results[0].detector_counts == {future: 2}
-    assert exc_info.value.blocked[0].result.primary_outcome == future
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
-async def test_async_decoding_accepts_nonnegative_detector_counts(batch):
-    detector_counts = {"secret_exposure": 0, "future_policy_violation": 2}
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        result_body = {
-            "prediction": "BENIGN",
-            "score": 0.1,
-            "threshold": 0.5,
-            "detector_counts": detector_counts,
-        }
-        body = {"predictions": [result_body]} if batch else result_body
-        return httpx.Response(200, request=request, json=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
-        result = (
-            (await fw.classify_batch(["safe"]))[0]
-            if batch
-            else await fw.classify("safe")
-        )
-
-    assert result.detector_counts == detector_counts
+    assert result == BlockResult(action="allow")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
 @pytest.mark.parametrize(
-    "outcome",
-    ["secret_exposure", "future_policy_violation"],
-    ids=["known", "future"],
+    ("body", "message"),
+    [
+        ({}, "missing required 'prediction' field"),
+        ({"results": {"action": "allow"}}, "'results' must be a list"),
+        ({"predictions": [{"score": 0.5}]}, "missing required 'prediction' field"),
+        ({"results": []}, "results length 0 does not match texts length 1"),
+        ({"results": [{"source": "model"}]}, "missing required 'action' string"),
+        ({"results": [{"action": 1}]}, "missing required 'action' string"),
+        ({"results": ["allow"]}, "missing required 'action' string"),
+    ],
 )
-async def test_async_decoding_rejects_negative_detector_counts_before_callbacks(
-    batch, outcome
-):
+async def test_async_decoding_rejects_malformed_response_before_callbacks(batch, body, message):
     def handle(request: httpx.Request) -> httpx.Response:
-        result_body = {
-            "prediction": "BENIGN",
-            "score": 0.1,
-            "threshold": 0.5,
-            "detector_counts": {outcome: -1},
-        }
-        body = {"predictions": [result_body]} if batch else result_body
         return httpx.Response(200, request=request, json=body)
 
     events: list[ClassifyEvent] = []
@@ -518,37 +438,13 @@ async def test_async_decoding_rejects_negative_detector_counts_before_callbacks(
             http_client=client,
             on_classify=events.append,
         )
-        with pytest.raises(ValueError, match="expected nonnegative int"):
+        with pytest.raises(ValueError, match=message):
             if batch:
                 await fw.classify_batch(["malformed"])
             else:
                 await fw.classify("malformed")
 
     assert events == []
-
-
-@pytest.mark.asyncio
-async def test_async_batch_rejects_malformed_outcome_map():
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            request=request,
-            json={
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.91,
-                        "threshold": 0.5,
-                        "outcome_scores": {"benign": 0.8},
-                    }
-                ]
-            },
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
-        with pytest.raises(ValueError, match="invalid outcome_scores key"):
-            await fw.classify_batch(["malformed"], mode="shadow")
 
 
 @pytest.mark.asyncio
@@ -560,7 +456,7 @@ async def test_async_handler_uses_supplied_async_firewall_pool_and_semantics(mon
     async def handle(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return response(request, prediction="MALICIOUS", score=0.9)
+        return response(request, action="block")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         fw = AsyncFirewall(api_key="sk", api_url=TEST_API_URL, http_client=client)
@@ -635,7 +531,7 @@ async def test_post_json_rejects_redirects():
             max_retries=0,
         )
         with pytest.raises(SilmarilApiError) as exc_info:
-            await fw._post_json({"text": "hello", "threshold": 0.5})
+            await fw._post_json(client, V2_URL, {"text": "hello"})
 
     assert calls[0]["follow_redirects"] is False
     assert exc_info.value.status == 302
@@ -658,7 +554,7 @@ async def test_post_json_caps_error_body_and_redacts_message():
             max_retries=0,
         )
         with pytest.raises(SilmarilApiError) as exc_info:
-            await fw._post_json({"text": "hello", "threshold": 0.5})
+            await fw._post_json(client, V2_URL, {"text": "hello"})
 
     assert exc_info.value.body == body[:_MAX_ERROR_BODY_BYTES]
     assert body[:128] not in str(exc_info.value)
@@ -687,7 +583,7 @@ async def test_error_body_read_stops_at_cap_instead_of_downloading_whole_respons
             max_retries=0,
         )
         with pytest.raises(SilmarilApiError) as exc_info:
-            await fw._post_json({"text": "hello"})
+            await fw._post_json(client, V2_URL, {"text": "hello"})
 
     assert exc_info.value.body == "x" * _MAX_ERROR_BODY_BYTES
     assert produced <= _MAX_ERROR_BODY_BYTES + len(chunk)
@@ -744,8 +640,8 @@ async def test_aclose_drains_active_retry_and_rejects_new_work(monkeypatch):
 
     sleep_release.set()
     sibling_release.set()
-    assert (await retrying).prediction == "BENIGN"
-    assert (await sibling).prediction == "BENIGN"
+    assert (await retrying).action == "allow"
+    assert (await sibling).action == "allow"
     await asyncio.wait_for(closing, timeout=1)
 
     assert attempts == ["retrying", "sibling", "retrying"]
@@ -774,7 +670,7 @@ async def test_aclose_from_classify_callback_does_not_deadlock(monkeypatch):
 
     result = await asyncio.wait_for(fw.classify("hello"), timeout=1)
 
-    assert result.prediction == "BENIGN"
+    assert result.action == "allow"
     assert closed_from_callback == [True]
     assert fw._client.is_closed is True
 
@@ -807,7 +703,7 @@ async def test_aclose_inside_active_request_raises_and_leaves_owned_pool_open(mo
 
     result = await asyncio.wait_for(fw.classify("retry then succeed"), timeout=1)
 
-    assert result.prediction == "BENIGN"
+    assert result.action == "allow"
     assert attempts == ["retry then succeed", "retry then succeed"]
     assert len(close_errors) == 1
     assert fw._closing is False
@@ -934,7 +830,7 @@ async def test_cancelled_aclose_waiter_still_closes_owned_pool_once(monkeypatch)
     assert fw._client.is_closed is False
 
     sleep_release.set()
-    assert (await retrying).prediction == "BENIGN"
+    assert (await retrying).action == "allow"
     await asyncio.wait_for(fw._close_task, timeout=1)
 
     assert close_calls == 1
@@ -1030,8 +926,7 @@ async def test_body_read_error_is_retried_and_then_succeeds(monkeypatch):
 
     assert attempts == 2
     assert sleeps == [(0, None)]
-    assert result.prediction == "BENIGN"
-    assert result.score == 0.1
+    assert result.action == "allow"
 
 
 @pytest.mark.asyncio
@@ -1064,7 +959,7 @@ async def test_error_body_read_failure_follows_transport_retry_policy(monkeypatc
         result = await asyncio.wait_for(retrying.classify("error body fails once"), timeout=1)
 
         assert attempts == 2
-        assert result.prediction == "BENIGN"
+        assert result.action == "allow"
 
         attempts = 0
         exhausted = AsyncFirewall(
@@ -1089,24 +984,7 @@ async def test_classify_batch_snapshots_inputs_before_awaiting():
         started.set()
         await release.wait()
         return httpx.Response(
-            200,
-            request=request,
-            json={
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.9,
-                        "threshold": 0.5,
-                        "mode": "block",
-                    },
-                    {
-                        "prediction": "BENIGN",
-                        "score": 0.1,
-                        "threshold": 0.5,
-                        "mode": "block",
-                    },
-                ]
-            },
+            200, request=request, json=results(model_block(), decision())
         )
 
     texts = ["attack", "safe"]
@@ -1134,7 +1012,7 @@ async def test_classify_batch_snapshots_inputs_before_awaiting():
 
     assert [event.text for event in events] == ["attack", "safe"]
     assert [event.hook for event in events] == [HookLabel.USER_INPUT, HookLabel.TOOL_RESPONSE]
-    assert [result.prediction for result in exc_info.value.results] == ["MALICIOUS", "BENIGN"]
+    assert [result.action for result in exc_info.value.results] == ["block", "allow"]
     blocked = exc_info.value.blocked[0]
     assert (blocked.index, blocked.text, blocked.hook, blocked.tool_name) == (
         0,

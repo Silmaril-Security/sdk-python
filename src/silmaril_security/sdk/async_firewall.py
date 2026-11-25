@@ -13,6 +13,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import uuid4
 
+from silmaril_security.sdk._classify_contract import FALLBACK_STATUS_CODES, ClassifyRoute
 from silmaril_security.sdk._pending import (
     DEFAULT_MAX_CONCURRENT,
     DEFAULT_MAX_QUEUED,
@@ -35,13 +36,11 @@ from silmaril_security.sdk.firewall import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
     _batch_payload,
-    _batch_results,
-    _block_result_from_json,
+    _block_results,
     _effective_mode,
     _effective_review,
     _enforces,
     _new_classify_event,
-    _require_review_acknowledgement,
     _retry_after_seconds,
     _retry_budget,
     _single_payload,
@@ -93,7 +92,7 @@ async def _aread_capped_error_body(
 
 
 class AsyncFirewall:
-    """Async client for the Silmaril Firewall /classify endpoint."""
+    """Async client for the Silmaril Firewall classify API."""
 
     def __init__(
         self,
@@ -141,6 +140,7 @@ class AsyncFirewall:
         self.on_classify = on_classify
         self.max_retries = max_retries
         self._httpx = httpx
+        self._route = ClassifyRoute.from_api_url(api_url)
         self._client = http_client
         self._owns_client = http_client is None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -259,8 +259,6 @@ class AsyncFirewall:
         await self._fire_on_classify(event)
         if event.blocked and event.mode == "block":
             raise FirewallBlockedException(
-                score=result.score,
-                threshold=result.threshold,
                 prompt_text=text,
                 hook=event.hook,
                 tool_name=tool_name,
@@ -405,9 +403,9 @@ class AsyncFirewall:
             mode=mode,
             review=requested_review,
         )
-        data = await self._post_json(payload)
-        _require_review_acknowledgement(data, requested_review)
-        return _block_result_from_json(data, mode, review=requested_review)
+        return (
+            await self._decide(payload, expected_length=1, mode=mode, review=requested_review)
+        )[0]
 
     async def _classify_batch_raw(
         self,
@@ -432,74 +430,88 @@ class AsyncFirewall:
             mode=mode,
             review=requested_review,
         )
-        data = await self._post_json(payload)
-        _require_review_acknowledgement(data, requested_review)
-        return _batch_results(
-            data,
-            expected_length=len(text_list),
-            mode=mode,
-            review=requested_review,
+        return await self._decide(
+            payload, expected_length=len(text_list), mode=mode, review=requested_review
         )
 
-    async def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _decide(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_length: int,
+        mode: FirewallMode | None,
+        review: ReviewLevel | None,
+    ) -> list[BlockResult]:
+        decode = partial(_block_results, expected_length=expected_length, mode=mode, review=review)
         client = self._ensure_client()
-        headers = {"x-api-key": self.api_key, "content-type": "application/json"}
         self._begin_request()
-        max_retries = _retry_budget(self.max_retries)
         try:
-            for attempt in range(max_retries + 1):
-                request = client.build_request(
-                    "POST",
-                    self.api_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=self.timeout,
-                )
-                retry_after: str | None = None
-                should_retry = False
-                # Sending and streaming the body share one retry scope, so a
-                # transport failure mid-download is retried like a failed send.
+            if not self._route.legacy:
                 try:
-                    response = await client.send(
-                        request,
-                        stream=True,
-                        follow_redirects=False,
-                    )
-                    try:
-                        if (
-                            response.status_code in _RETRYABLE_STATUS_CODES
-                            and attempt < max_retries
-                        ):
-                            retry_after = response.headers.get("Retry-After")
-                            should_retry = True
-                        elif response.status_code >= 300:
-                            # Read the error body as a capped stream so an oversized
-                            # response is never buffered in full just to be truncated.
-                            body = await _aread_capped_error_body(
-                                response, self._httpx.HTTPError
-                            )
-                            raise SilmarilApiError(
-                                status=response.status_code,
-                                status_text=response.reason_phrase,
-                                body=body,
-                            )
-                        else:
-                            await response.aread()
-                    finally:
-                        await response.aclose()
-                except self._httpx.HTTPError:
-                    if attempt < max_retries:
-                        await self._sleep_before_retry(attempt, None)
-                        continue
-                    raise
-
-                if should_retry:
-                    await self._sleep_before_retry(attempt, retry_after)
-                    continue
-                return response.json()
-            raise RuntimeError("Firewall: exhausted retries")
+                    return decode(await self._post_json(client, self._route.v2_url, payload))
+                except SilmarilApiError as error:
+                    if error.status not in FALLBACK_STATUS_CODES:
+                        raise
+            results = decode(await self._post_json(client, self._route.v1_url, payload))
+            self._route.legacy = True
+            return results
         finally:
             self._end_request()
+
+    async def _post_json(self, client: httpx.AsyncClient, url: str, payload: dict[str, Any]) -> Any:
+        headers = {"x-api-key": self.api_key, "content-type": "application/json"}
+        max_retries = _retry_budget(self.max_retries)
+        for attempt in range(max_retries + 1):
+            request = client.build_request(
+                "POST",
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout,
+            )
+            retry_after: str | None = None
+            should_retry = False
+            # Sending and streaming the body share one retry scope, so a
+            # transport failure mid-download is retried like a failed send.
+            try:
+                response = await client.send(
+                    request,
+                    stream=True,
+                    follow_redirects=False,
+                )
+                try:
+                    if (
+                        response.status_code in _RETRYABLE_STATUS_CODES
+                        and attempt < max_retries
+                    ):
+                        retry_after = response.headers.get("Retry-After")
+                        should_retry = True
+                    elif response.status_code >= 300:
+                        # Read the error body as a capped stream so an oversized
+                        # response is never buffered in full just to be truncated.
+                        body = await _aread_capped_error_body(
+                            response, self._httpx.HTTPError
+                        )
+                        raise SilmarilApiError(
+                            status=response.status_code,
+                            status_text=response.reason_phrase,
+                            body=body,
+                        )
+                    else:
+                        await response.aread()
+                finally:
+                    await response.aclose()
+            except self._httpx.HTTPError:
+                if attempt < max_retries:
+                    await self._sleep_before_retry(attempt, None)
+                    continue
+                raise
+
+            if should_retry:
+                await self._sleep_before_retry(attempt, retry_after)
+                continue
+            return response.json()
+        raise RuntimeError("Firewall: exhausted retries")
 
     def _begin_request(self) -> None:
         self._active_requests += 1

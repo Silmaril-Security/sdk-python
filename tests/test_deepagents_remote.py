@@ -36,7 +36,7 @@ def firewall(monkeypatch, *, block=True):
     def classify(text, **options):
         seen.append((text, options))
         denied = block and "unsafe" in text
-        return BlockResult("MALICIOUS" if denied else "BENIGN", 0.9 if denied else 0.1, 0.5, mode="block")
+        return BlockResult("block" if denied else "allow", mode="block")
 
     monkeypatch.setattr(fw, "_classify_raw", classify)
     return fw, seen

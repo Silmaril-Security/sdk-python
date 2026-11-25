@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 import requests
+from wire import TEST_API_URL, FakeResponse, RecordingAdapter, decision, model_block, results
 
 from silmaril_security.sdk import (
     AsyncFirewall,
@@ -22,53 +23,6 @@ from silmaril_security.sdk.exceptions import (
     ReviewCompatibilityError as DirectReviewCompatibilityError,
 )
 from silmaril_security.sdk.types import ReviewLevel as DirectReviewLevel
-
-TEST_API_URL = "https://api.test.invalid/classify"
-
-
-class FakeResponse:
-    def __init__(
-        self,
-        status_code: int,
-        body: dict[str, Any] | str,
-        *,
-        reason: str | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self._body = body
-        self.reason = reason or f"status-{status_code}"
-        self.headers = headers or {}
-
-    @property
-    def text(self) -> str:
-        return self._body if isinstance(self._body, str) else str(self._body)
-
-    def json(self) -> dict[str, Any]:
-        assert isinstance(self._body, dict)
-        return self._body
-
-
-class RecordingAdapter(requests.adapters.BaseAdapter):
-    def __init__(self, responses: list[tuple[int, dict[str, Any] | str]]) -> None:
-        self.responses = responses
-        self.requests: list[requests.PreparedRequest] = []
-
-    def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
-        self.requests.append(request)
-        status_code, body = self.responses.pop(0)
-        response = requests.Response()
-        response.status_code = status_code
-        response.request = request
-        response.url = request.url
-        response._content = (
-            json.dumps(body).encode() if isinstance(body, dict) else body.encode()
-        )
-        return response
-
-    def close(self) -> None:
-        pass
-
 
 INVALID_REVIEWS = (
     "",
@@ -84,7 +38,7 @@ INVALID_REVIEWS = (
 
 
 def _benign(*, review: str | None = None) -> dict[str, Any]:
-    body: dict[str, Any] = {"prediction": "BENIGN", "score": 0.12, "threshold": 0.5}
+    body = results(decision())
     if review is not None:
         body["review"] = review
     return body
@@ -180,7 +134,7 @@ def test_client_default_review_is_sent_when_per_call_omitted(monkeypatch):
     assert result.review == "standard"
 
 
-def test_sync_batch_uses_top_level_review_not_predictions(monkeypatch):
+def test_sync_batch_uses_top_level_review_not_results(monkeypatch):
     fw = Firewall(api_key="sk", api_url=TEST_API_URL)
     calls: list[dict[str, Any]] = []
 
@@ -188,28 +142,17 @@ def test_sync_batch_uses_top_level_review_not_predictions(monkeypatch):
         calls.append(kwargs)
         return FakeResponse(
             200,
-            {
-                "review": "deep",
-                "predictions": [
-                    {
-                        "prediction": "BENIGN",
-                        "score": 0.1,
-                        "threshold": 0.5,
-                        "review": "standard",
-                    },
-                    {"prediction": "BENIGN", "score": 0.2, "threshold": 0.5},
-                ],
-            },
+            results(decision(review="standard"), decision(), review="deep"),
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
 
-    results = fw.classify_batch(["a", "b"], review="deep", request_id="req-batch")
+    decisions = fw.classify_batch(["a", "b"], review="deep", request_id="req-batch")
 
     payload = json.loads(calls[0]["data"])
     assert payload["review"] == "deep"
     assert payload["texts"] == ["a", "b"]
-    assert [result.review for result in results] == ["deep", "deep"]
+    assert [result.review for result in decisions] == ["deep", "deep"]
 
 
 def test_missing_and_mismatched_ack_do_not_reach_callback_or_block(monkeypatch):
@@ -227,12 +170,7 @@ def test_missing_and_mismatched_ack_do_not_reach_callback_or_block(monkeypatch):
         calls += 1
         return FakeResponse(
             200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.99,
-                "threshold": 0.5,
-                "metadata": {"silmaril": {"review": "deep"}},
-            },
+            results(model_block(), metadata={"silmaril": {"review": "deep"}}),
         )
 
     monkeypatch.setattr(fw._session, "post", missing_ack)
@@ -251,12 +189,7 @@ def test_missing_and_mismatched_ack_do_not_reach_callback_or_block(monkeypatch):
         calls += 1
         return FakeResponse(
             200,
-            {
-                "prediction": "MALICIOUS",
-                "score": 0.99,
-                "threshold": 0.5,
-                "review": "standard",
-            },
+            results(model_block(), review="standard"),
         )
 
     calls = 0
@@ -270,7 +203,7 @@ def test_missing_and_mismatched_ack_do_not_reach_callback_or_block(monkeypatch):
     assert events == []
 
 
-def test_batch_missing_envelope_ack_ignores_prediction_review(monkeypatch):
+def test_batch_missing_envelope_ack_ignores_result_review(monkeypatch):
     events: list[Any] = []
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, on_classify=events.append, max_retries=2)
     calls = 0
@@ -280,16 +213,7 @@ def test_batch_missing_envelope_ack_ignores_prediction_review(monkeypatch):
         calls += 1
         return FakeResponse(
             200,
-            {
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.9,
-                        "threshold": 0.5,
-                        "review": "standard",
-                    }
-                ]
-            },
+            results(model_block(review="standard")),
         )
 
     monkeypatch.setattr(fw._session, "post", fake_post)
@@ -372,7 +296,7 @@ def test_ack_failure_precedes_block_exception(monkeypatch):
         "post",
         lambda *_args, **_kwargs: FakeResponse(
             200,
-            {"prediction": "MALICIOUS", "score": 0.99, "threshold": 0.5, "review": "standard"},
+            results(model_block(), review="standard"),
         ),
     )
     with pytest.raises(ReviewCompatibilityError):
@@ -386,7 +310,7 @@ def test_successful_ack_still_enforces_block(monkeypatch):
         "post",
         lambda *_args, **_kwargs: FakeResponse(
             200,
-            {"prediction": "MALICIOUS", "score": 0.99, "threshold": 0.5, "review": "standard"},
+            results(model_block(), review="standard"),
         ),
     )
     with pytest.raises(FirewallBlockedException) as exc_info:
@@ -404,11 +328,7 @@ async def test_async_client_and_per_call_precedence():
 
         payload = json.loads(request.content)
         payloads.append(payload)
-        body: dict[str, Any] = {
-            "prediction": "BENIGN",
-            "score": 0.1,
-            "threshold": 0.5,
-        }
+        body = results(decision())
         if "review" in payload:
             body["review"] = payload["review"]
         return httpx.Response(200, request=request, json=body)
@@ -453,16 +373,7 @@ async def test_async_batch_and_ack_mismatch_is_not_retried():
         return httpx.Response(
             200,
             request=request,
-            json={
-                "predictions": [
-                    {
-                        "prediction": "MALICIOUS",
-                        "score": 0.9,
-                        "threshold": 0.5,
-                        "review": "deep",
-                    }
-                ]
-            },
+            json=results(model_block(review="deep")),
         )
 
     events: list[Any] = []
@@ -497,13 +408,7 @@ async def test_async_retries_preserve_review_and_successful_batch_ack():
         return httpx.Response(
             200,
             request=request,
-            json={
-                "review": "standard",
-                "predictions": [
-                    {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5},
-                    {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5, "mode": "warn"},
-                ],
-            },
+            json=results(decision(), model_block(), review="standard"),
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
@@ -513,12 +418,12 @@ async def test_async_retries_preserve_review_and_successful_batch_ack():
             http_client=client,
             max_retries=1,
         )
-        results = await fw.classify_batch(["a", "b"], review="standard", mode="warn")
+        decisions = await fw.classify_batch(["a", "b"], review="standard", mode="warn")
         await fw.aclose()
 
     assert [payload["review"] for payload in payloads] == ["standard", "standard"]
-    assert [result.review for result in results] == ["standard", "standard"]
-    assert results[1].prediction == "MALICIOUS"
+    assert [result.review for result in decisions] == ["standard", "standard"]
+    assert decisions[1].action == "block"
 
 
 @pytest.mark.asyncio
@@ -542,12 +447,7 @@ async def test_concurrent_reviews_do_not_bleed_client_state():
         return httpx.Response(
             200,
             request=request,
-            json={
-                "prediction": "BENIGN",
-                "score": 0.1 if payload["text"] == "first" else 0.2,
-                "threshold": 0.5,
-                "review": payload["review"],
-            },
+            json=results(decision(), review=payload["review"]),
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
@@ -609,9 +509,7 @@ def test_langchain_and_deepagents_inherit_client_review_without_new_options():
 
 def test_langchain_fail_open_does_not_swallow_review_compatibility():
     pytest.importorskip("langchain_core.callbacks")
-    adapter = RecordingAdapter(
-        [(200, {"prediction": "BENIGN", "score": 0.1, "threshold": 0.5})]
-    )
+    adapter = RecordingAdapter([(200, results(decision()))])
     session = requests.Session()
     session.mount("https://api.test.invalid/", adapter)
     fw = Firewall(api_key="sk", api_url=TEST_API_URL, session=session, review="standard")
@@ -632,12 +530,7 @@ def test_sync_batch_block_after_ack(monkeypatch):
         "post",
         lambda *_args, **_kwargs: FakeResponse(
             200,
-            {
-                "review": "standard",
-                "predictions": [
-                    {"prediction": "MALICIOUS", "score": 0.9, "threshold": 0.5, "mode": "block"}
-                ],
-            },
+            results(model_block(), review="standard"),
         ),
     )
     with pytest.raises(BatchFirewallBlockedException) as exc_info:
@@ -858,7 +751,9 @@ async def test_async_langchain_bridge_inherits_client_review(monkeypatch, acknow
 
     recorded: list[dict[str, Any]] = []
 
-    async def post_json(self: AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
+    async def post_json(
+        self: AsyncClient, client: Any, url: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         recorded.append(payload)
         body = _benign()
         if acknowledge:
