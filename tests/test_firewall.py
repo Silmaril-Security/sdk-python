@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import requests
@@ -1074,6 +1076,99 @@ def test_retries_retryable_status(monkeypatch):
 
     assert result.prediction == "BENIGN"
     assert sleeps == [1, 2]
+
+
+def _streamed_response(status: int, chunks: Iterator[bytes]) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status
+    response.raw = Mock()
+    response.raw.stream.return_value = chunks
+    return response
+
+
+@pytest.mark.parametrize(("status", "retry_after"), [(429, "7"), (503, "0")])
+def test_retryable_response_respects_retry_after(monkeypatch, status, retry_after):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, max_retries=1)
+    retryable = _streamed_response(status, iter([b"unavailable"]))
+    retryable.headers["Retry-After"] = retry_after
+    success = _streamed_response(
+        200, iter([b'{"prediction":"BENIGN","score":0.01,"threshold":0.5}'])
+    )
+    post = Mock(side_effect=[retryable, success])
+    sleeps: list[float] = []
+
+    def record_sleep(delay: float) -> None:
+        retryable.raw.close.assert_called_once_with()
+        sleeps.append(delay)
+
+    monkeypatch.setattr(fw._session, "post", post)
+    monkeypatch.setattr("silmaril_security.sdk.firewall.time.sleep", record_sleep)
+
+    assert fw.classify("hello").prediction == "BENIGN"
+    assert post.call_count == 2
+    assert sleeps == [float(retry_after)]
+    retryable.raw.stream.assert_not_called()
+    success.raw.release_conn.assert_called_once_with()
+
+
+def _interrupted_body() -> Iterator[bytes]:
+    yield b'{"prediction":'
+    raise requests.exceptions.ChunkedEncodingError("response interrupted")
+
+
+def test_body_read_error_is_retried_and_then_succeeds(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, max_retries=1)
+    interrupted = _streamed_response(200, _interrupted_body())
+    success = _streamed_response(
+        200, iter([b'{"prediction":"BENIGN","score":0.01,"threshold":0.5}'])
+    )
+    post = Mock(side_effect=[interrupted, success])
+    sleeps: list[float] = []
+
+    def record_sleep(delay: float) -> None:
+        interrupted.raw.close.assert_called_once_with()
+        sleeps.append(delay)
+
+    monkeypatch.setattr(fw._session, "post", post)
+    monkeypatch.setattr("silmaril_security.sdk.firewall.time.sleep", record_sleep)
+
+    assert fw.classify("hello").prediction == "BENIGN"
+    assert post.call_count == 2
+    assert sleeps == [1]
+    success.raw.release_conn.assert_called_once_with()
+
+
+def test_body_read_error_exhausts_retry_budget_and_closes_response(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, max_retries=1)
+    responses = [_streamed_response(200, _interrupted_body()) for _ in range(2)]
+    post = Mock(side_effect=responses)
+    sleeps: list[float] = []
+    monkeypatch.setattr(fw._session, "post", post)
+    monkeypatch.setattr("silmaril_security.sdk.firewall.time.sleep", sleeps.append)
+
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
+        fw.classify("hello")
+
+    assert post.call_count == 2
+    assert sleeps == [1]
+    for response in responses:
+        response.raw.close.assert_called_once_with()
+
+
+def test_invalid_success_json_is_not_retried_and_response_is_closed(monkeypatch):
+    fw = Firewall(api_key="sk", api_url=TEST_API_URL, max_retries=1)
+    malformed = _streamed_response(200, iter([b"not JSON"]))
+    post = Mock(return_value=malformed)
+    sleeps: list[float] = []
+    monkeypatch.setattr(fw._session, "post", post)
+    monkeypatch.setattr("silmaril_security.sdk.firewall.time.sleep", sleeps.append)
+
+    with pytest.raises(requests.exceptions.JSONDecodeError):
+        fw.classify("hello")
+
+    post.assert_called_once()
+    assert sleeps == []
+    malformed.raw.release_conn.assert_called_once_with()
 
 
 def test_api_error_on_non_retryable_status(monkeypatch):
