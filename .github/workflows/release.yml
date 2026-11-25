@@ -285,7 +285,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Silmaril-Security/SilmarilCustomerTests
-          ref: 6fe05d90e37a574accfc622410d2d51c52f93fb3
+          ref: add23c2e9ecff46683a798575b66a69926788ded
           token: ${{ steps.reader.outputs.token }}
           path: _customer
           persist-credentials: false
@@ -308,11 +308,10 @@ jobs:
           artifact: ${{ steps.package.outputs.path }}
           consumer: customer/${{ matrix.consumer }}
           source-sha: ${{ github.sha }}
-          framework-sha: 6fe05d90e37a574accfc622410d2d51c52f93fb3
+          framework-sha: add23c2e9ecff46683a798575b66a69926788ded
         env:
           SILMARIL_API_URL: ${{ secrets.CUSTOMER_API_URL }}
           SILMARIL_API_KEY: ${{ secrets.CUSTOMER_API_KEY }}
-          CUSTOMER_BACKEND_ID: ${{ secrets.CUSTOMER_BACKEND_ID }}
           CUSTOMER_TESTS_READ_TOKEN: ${{ steps.reader.outputs.token }}
           CUSTOMER_UI_URL: ${{ secrets.CUSTOMER_UI_URL }}
           CUSTOMER_LOGIN_EMAIL: ${{ secrets.CUSTOMER_LOGIN_EMAIL }}
