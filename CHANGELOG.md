@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.1
+
+- Honor `Retry-After` on retryable HTTP error responses in the synchronous
+  client.
+- Retry transient failures while reading successful response bodies, close
+  responses reliably, and do not retry malformed successful JSON responses.
+
 ## 0.11.0
 
 - Breaking: rename the tenant acceptable-use policy outcome to `abuse`.
