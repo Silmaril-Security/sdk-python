@@ -1,0 +1,19 @@
+name: Public repo guard
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  public-repo-guard:
+    name: public-repo-guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: Silmaril-Security/public-repo-guard@24e1158604e5aa570d10e3c13997faec01e76a94
+        with:
+          customer-pattern: ${{ secrets.PUBLIC_REPO_GUARD_CUSTOMER_PATTERN }}

@@ -17,7 +17,7 @@ HarmfulOutcome = Literal[
     "story_script_generation",
     "game_generation",
     "website_generation",
-    "clickup_terms_violation",
+    "abuse",
     "traditional_ai_abuse",
 ]
 
@@ -32,7 +32,7 @@ OUTCOME_CODE_GENERATION: HarmfulOutcome = "code_generation"
 OUTCOME_STORY_SCRIPT_GENERATION: HarmfulOutcome = "story_script_generation"
 OUTCOME_GAME_GENERATION: HarmfulOutcome = "game_generation"
 OUTCOME_WEBSITE_GENERATION: HarmfulOutcome = "website_generation"
-OUTCOME_CLICKUP_TERMS_VIOLATION: HarmfulOutcome = "clickup_terms_violation"
+OUTCOME_ABUSE: HarmfulOutcome = "abuse"
 OUTCOME_TRADITIONAL_AI_ABUSE: HarmfulOutcome = "traditional_ai_abuse"
 
 HARMFUL_OUTCOMES: tuple[HarmfulOutcome, ...] = (
@@ -45,7 +45,7 @@ HARMFUL_OUTCOMES: tuple[HarmfulOutcome, ...] = (
     OUTCOME_STORY_SCRIPT_GENERATION,
     OUTCOME_GAME_GENERATION,
     OUTCOME_WEBSITE_GENERATION,
-    OUTCOME_CLICKUP_TERMS_VIOLATION,
+    OUTCOME_ABUSE,
     OUTCOME_TRADITIONAL_AI_ABUSE,
 )
 
@@ -84,9 +84,7 @@ OUTCOME_DESCRIPTIONS: Mapping[HarmfulOutcome, str] = {
     OUTCOME_WEBSITE_GENERATION: (
         "Requests generation of a website, landing page, storefront, or web experience."
     ),
-    OUTCOME_CLICKUP_TERMS_VIOLATION: (
-        "Requests content or actions that violate the configured ClickUp tenant policy."
-    ),
+    OUTCOME_ABUSE: "Requests content or actions that violate the tenant's acceptable-use policy.",
     OUTCOME_TRADITIONAL_AI_ABUSE: (
         "Requests unsafe AI assistance outside the concrete security outcome classes."
     ),

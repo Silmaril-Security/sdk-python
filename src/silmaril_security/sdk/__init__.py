@@ -35,7 +35,7 @@ from silmaril_security.sdk.hooks import (
 )
 from silmaril_security.sdk.outcomes import (
     HARMFUL_OUTCOMES,
-    OUTCOME_CLICKUP_TERMS_VIOLATION,
+    OUTCOME_ABUSE,
     OUTCOME_CODE_GENERATION,
     OUTCOME_CONTROL_ABUSE,
     OUTCOME_DESCRIPTIONS,
@@ -103,7 +103,7 @@ __all__ = [
     "HarmfulOutcomeValue",
     "HookLabel",
     "INPUT_HOOKS",
-    "OUTCOME_CLICKUP_TERMS_VIOLATION",
+    "OUTCOME_ABUSE",
     "OUTCOME_CODE_GENERATION",
     "OUTCOME_CONTROL_ABUSE",
     "OUTCOME_DESCRIPTIONS",

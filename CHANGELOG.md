@@ -60,6 +60,22 @@ assessment is the reason for the block: they are `None` on an allow, on a
 block that came from a governance policy, and on a block the Firewall reached
 without that assessment.
 
+## 0.11.1
+
+- Honor `Retry-After` on retryable HTTP error responses in the synchronous
+  client.
+- Retry transient failures while reading successful response bodies, close
+  responses reliably, and do not retry malformed successful JSON responses.
+
+## 0.11.0
+
+- Breaking: rename the tenant acceptable-use policy outcome to `abuse`.
+  `OUTCOME_ABUSE` replaces the tenant-specific constant, and the
+  `PrimaryOutcome` and `HarmfulOutcome` literals, `PRIMARY_OUTCOMES`,
+  `HARMFUL_OUTCOMES`, and `OUTCOME_DESCRIPTIONS` list `abuse` in the same
+  position. Responses that still carry the previous label continue to decode
+  as an open-ended outcome string.
+
 ## 0.10.1
 
 - Reject missing, non-numeric, non-finite, or out-of-range verdict `score` and
@@ -268,8 +284,8 @@ All notable changes to the Silmaril Firewall Python SDK are documented here.
 ## 0.5.1 - 2026-07-29
 
 - Add typed support for `code_generation`, `story_script_generation`,
-  `game_generation`, `website_generation`, `clickup_terms_violation`, and
-  `traditional_ai_abuse`.
+  `game_generation`, `website_generation`, `traditional_ai_abuse`, and the
+  tenant acceptable-use policy outcome now named `abuse`.
 - Extend ordered outcome collections, descriptions, validators, normalization
   fixtures, exports, and documentation without changing the `/classify` wire
   shape.

@@ -750,30 +750,37 @@ class Firewall:
                     allow_redirects=False,
                     stream=True,
                 )
+                try:
+                    if response.status_code < 300:
+                        return response.json()
+                    if response.status_code not in _RETRYABLE_STATUS_CODES or attempt == max_retries:
+                        error_body = _read_capped_error_body(response)
+                        raise SilmarilApiError(
+                            status=response.status_code,
+                            status_text=getattr(response, "reason", "") or "",
+                            body=error_body,
+                        )
+                finally:
+                    _close_response(response)
+            except requests.exceptions.JSONDecodeError:
+                # A malformed successful response is not a transport failure.
+                raise
             except requests.RequestException:
                 if attempt < max_retries:
                     self._sleep_before_retry(attempt, None)
                     continue
                 raise
 
-            if response.status_code in _RETRYABLE_STATUS_CODES and attempt < max_retries:
-                _close_response(response)
-                self._sleep_before_retry(attempt, response)
-                continue
-            if response.status_code >= 300:
-                error_body = _read_capped_error_body(response)
-                _close_response(response)
-                raise SilmarilApiError(
-                    status=response.status_code,
-                    status_text=getattr(response, "reason", "") or "",
-                    body=error_body,
-                )
-            return response.json()
+            self._sleep_before_retry(attempt, response)
 
         raise RuntimeError("Firewall: exhausted retries")
 
     def _sleep_before_retry(self, attempt: int, response: requests.Response | None) -> None:
-        retry_after = _retry_after_seconds(response.headers.get("Retry-After")) if response else None
+        retry_after = (
+            _retry_after_seconds(response.headers.get("Retry-After"))
+            if response is not None
+            else None
+        )
         wait = retry_after if retry_after is not None else min(2**attempt, _MAX_BACKOFF_SECONDS)
         LOG.debug("retrying firewall request in %.2fs after attempt %d", wait, attempt + 1)
         time.sleep(wait)
