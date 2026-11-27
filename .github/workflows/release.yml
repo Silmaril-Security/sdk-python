@@ -19,6 +19,7 @@ jobs:
     outputs:
       should_test: ${{ steps.selection.outputs.should_test }}
       should_release: ${{ steps.plan.outputs.should_release }}
+      reconcile_release: ${{ steps.plan.outputs.reconcile_release }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
     steps:
@@ -68,9 +69,14 @@ jobs:
             exit 1
           fi
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
             tag_exists=true
           else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then
+              echo "::error::Could not check release tag $tag (git ls-remote exit $status)."
+              exit "$status"
+            fi
             tag_exists=false
           fi
 
@@ -98,9 +104,11 @@ jobs:
             exit 1
           fi
 
+          reconcile_release=false
           if [[ "$tag_exists" == "true" && "$package_exists" == "true" ]]; then
             should_release=false
-            echo "Version $version is already tagged and published; skipping."
+            reconcile_release=true
+            echo "Version $version is already tagged and published; checking GitHub release metadata."
           elif [[ "$tag_exists" == "false" && "$package_exists" == "false" ]]; then
             should_release=true
             echo "Version $version has not been released; publishing."
@@ -117,6 +125,7 @@ jobs:
 
           {
             echo "should_release=${should_release}"
+            echo "reconcile_release=${reconcile_release}"
             echo "version=${version}"
             echo "tag=${tag}"
           } >> "$GITHUB_OUTPUT"
@@ -222,7 +231,10 @@ jobs:
     name: Create GitHub release
     runs-on: ubuntu-latest
     needs: [plan, tag]
-    if: needs.plan.outputs.should_release == 'true'
+    if: >-
+      ${{ !cancelled() && needs.plan.result == 'success' &&
+          (needs.tag.result == 'success' ||
+           (needs.plan.outputs.reconcile_release == 'true' && needs.tag.result == 'skipped')) }}
     permissions:
       contents: write
     steps:
@@ -235,10 +247,13 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if response=$(gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>&1); then
             echo "Release $TAG already exists; skipping."
+          elif [[ "$response" =~ ^HTTP/[0-9.]+[[:space:]]404[[:space:]] ]]; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes "Release $TAG"
           else
-            gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
+            echo "::error::Could not check GitHub release $TAG."
+            exit 1
           fi
 
   customer:
