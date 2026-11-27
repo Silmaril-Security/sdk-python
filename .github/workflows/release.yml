@@ -253,6 +253,7 @@ jobs:
             gh release create "$TAG" --verify-tag --title "$TAG" --notes "Release $TAG"
           else
             echo "::error::Could not check GitHub release $TAG."
+            printf '%s\n' "$response" >&2
             exit 1
           fi
 
